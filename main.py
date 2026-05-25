@@ -82,8 +82,8 @@ GEOIP_CACHE = {}
 geoip_calls_count = 0
 MAX_GEOIP_CALLS = 40
 
-# Переменная токена для Globalping (можно оставить пустой)
-GLOBALPING_TOKEN = os.getenv("GLOBALPING_TOKEN", "")
+# Переменная токена для Globalping (приоритет из ENV, иначе используется ваш предоставленный токен)
+GLOBALPING_TOKEN = os.getenv("GLOBALPING_TOKEN", "ozuwucpiutcobvnboqlrpxt6nggf2jqv")
 
 def decode_if_base64(text):
     clean_text = text.strip()
@@ -468,21 +468,40 @@ def get_country_code(ip, name):
     return "Unknown"
 
 # =====================================================================
-# ПРОВЕРКА ЧЕРЕЗ RU+EYEBALL ЗОНДЫ (ДОМАШНИЙ ИНТЕРНЕТ РФ)
+# ИСПРАВЛЕННАЯ ПРОВЕРКА ЧЕРЕЗ RU+EYEBALL ЗОНДЫ (ДОМАШНИЙ ИНТЕРНЕТ РФ)
 # =====================================================================
-def test_port_from_russia(host, port, timeout=12):
+def test_port_from_russia(host, port, timeout=12, is_tls=True):
     url = "https://api.globalping.io/v1/measurements"
-    payload = {
-        "type": "ping",
-        "target": host,
-        "locations": [{"magic": "RU+eyeball"}],
-        "limit": 1,
-        "measurementOptions": {
-            "protocol": "TCP",
-            "port": int(port),
-            "packets": 2
+    
+    # Если протокол защищен TLS (Reality, Trojan, TLS), используем HTTP/HTTPS проверку.
+    # Это вынуждает зонд провести полноценное TLS рукопожатие, которое ТСПУ может заблокировать.
+    # Если протокол не использует TLS (Shadowsocks, Hysteria2 и др.), используем стандартный TCP Ping.
+    if is_tls:
+        payload = {
+            "type": "http",
+            "target": host,
+            "locations": [{"magic": "RU+eyeball"}],
+            "limit": 1,
+            "measurementOptions": {
+                "port": int(port),
+                "protocol": "HTTPS",
+                "method": "GET",
+                "path": "/"
+            }
         }
-    }
+    else:
+        payload = {
+            "type": "ping",
+            "target": host,
+            "locations": [{"magic": "RU+eyeball"}],
+            "limit": 1,
+            "measurementOptions": {
+                "protocol": "TCP",
+                "port": int(port),
+                "packets": 2
+            }
+        }
+        
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -514,21 +533,27 @@ def test_port_from_russia(host, port, timeout=12):
                             return False
                         
                         probe_result = results[0].get("result", {})
-                        if probe_result.get("status") == "failed":
-                            return False
-                            
-                        stats = probe_result.get("stats", {})
-                        loss = stats.get("loss", 100)
-                        return loss < 100
                         
+                        if is_tls:
+                            # HTTP проверка успешна, если соединение не "failed".
+                            # ТСПУ блокирует handshake сбросом сессии (connection reset) или таймаутом, что вызовет статус "failed".
+                            return probe_result.get("status") != "failed"
+                        else:
+                            if probe_result.get("status") == "failed":
+                                return False
+                            stats = probe_result.get("stats", {})
+                            loss = stats.get("loss", 100)
+                            return loss < 100
+                            
                     elif status == "failed":
                         return False
             except Exception:
                 pass
         return False
     except Exception as e:
-        print(f" [!] Ошибка связи с API Globalping ({e}). Фолбек: считаем узел временно доступным.")
-        return True
+        # ПРЕДОТВРАЩЕНИЕ ЛОЖНЫХ СРАБАТЫВАНИЙ: Возвращаем False при сбое API.
+        print(f" [!] Ошибка связи с API Globalping ({e}). Возвращаем False (узел помечен временно недоступным).")
+        return False
 
 def get_rename_tag(country_code, index):
     global COUNTRY_INFO
@@ -568,7 +593,9 @@ def rename_vmess_config(raw_url, new_name):
 def check_ru_accessibility_worker(conf):
     host = conf["host"]
     port = conf["port"]
-    is_alive_in_ru = test_port_from_russia(host, port)
+    is_tls = conf.get("is_tls", False)
+    # Пробрасываем признак TLS, чтобы использовать качественную проверку HTTP
+    is_alive_in_ru = test_port_from_russia(host, port, is_tls=is_tls)
     if is_alive_in_ru:
         return conf
     return None
