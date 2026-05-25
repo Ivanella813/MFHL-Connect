@@ -67,6 +67,9 @@ GEOIP_CACHE = {}
 geoip_calls_count = 0
 MAX_GEOIP_CALLS = 40
 
+# Переменная токена для Globalping (можно оставить пустой)
+GLOBALPING_TOKEN = os.getenv("GLOBALPING_TOKEN", "")
+
 def decode_if_base64(text):
     clean_text = text.strip()
     if re.match(r'^[A-Za-z0-9+/=\s\n\r]+$', clean_text) and not clean_text.startswith("vless://") and not clean_text.startswith("vmess://") and len(clean_text) > 40:
@@ -367,6 +370,9 @@ def check_tls_or_tcp_worker(raw_conf):
         return parsed
     return None
 
+# =====================================================================
+# НАДЕЖНЫЙ GEOIP ЧЕРЕЗ FREEIPAPI.COM
+# =====================================================================
 def get_country_code(ip, name):
     global geoip_calls_count
     
@@ -380,6 +386,21 @@ def get_country_code(ip, name):
     if geoip_calls_count >= MAX_GEOIP_CALLS:
         return "Unknown"
         
+    # Сначала пытаемся обратиться к быстрому и лояльному freeipapi.com
+    try:
+        url = f"https://freeipapi.com/api/json/{ip}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=3) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            country = data.get("countryCode", "Unknown")
+            if country and country != "Unknown":
+                GEOIP_CACHE[ip] = country
+                geoip_calls_count += 1
+                return country
+    except Exception:
+        pass
+        
+    # Если freeipapi выдал ошибку, пробуем классический ip-api.com
     try:
         url = f"http://ip-api.com/json/{ip}?fields=status,countryCode"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -389,7 +410,7 @@ def get_country_code(ip, name):
                 country = data.get("countryCode", "Unknown")
                 GEOIP_CACHE[ip] = country
                 geoip_calls_count += 1
-                time.sleep(1.2)
+                time.sleep(1.2) # Необходимая пауза по правилам ip-api
                 return country
     except Exception:
         pass
@@ -397,18 +418,14 @@ def get_country_code(ip, name):
     return "Unknown"
 
 # =====================================================================
-# НОВЫЙ ФУНКЦИОНАЛ: ПРОВЕРКА ДОСТУПНОСТИ ИЗ РФ ЧЕРЕЗ GLOBALPING API
+# ПРОВЕРКА ЧЕРЕЗ RU+EYEBALL ЗОНДЫ (ДОМАШНИЙ ИНТЕРНЕТ РФ)
 # =====================================================================
 def test_port_from_russia(host, port, timeout=12):
-    """
-    Проверяет доступность хоста и порта из России с помощью бесплатного API Globalping.
-    Использует TCP-пинг из зондов, физически расположенных в РФ.
-    """
     url = "https://api.globalping.io/v1/measurements"
     payload = {
         "type": "ping",
         "target": host,
-        "locations": [{"country": "RU"}], # Ограничиваем тесты только зондами внутри РФ
+        "locations": [{"magic": "RU+eyeball"}], # Использование домашнего интернета в РФ
         "limit": 1,
         "measurementOptions": {
             "protocol": "TCP",
@@ -420,9 +437,10 @@ def test_port_from_russia(host, port, timeout=12):
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
+    if GLOBALPING_TOKEN:
+        headers["Authorization"] = f"Bearer {GLOBALPING_TOKEN}"
     
     try:
-        # 1. Создаем запрос на измерение
         req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=5) as r:
             res = json.loads(r.read().decode('utf-8'))
@@ -430,7 +448,6 @@ def test_port_from_russia(host, port, timeout=12):
             if not m_id:
                 return False
                 
-        # 2. Опрашиваем результат
         poll_url = f"https://api.globalping.io/v1/measurements/{m_id}"
         start_time = time.time()
         while time.time() - start_time < timeout:
@@ -446,15 +463,13 @@ def test_port_from_russia(host, port, timeout=12):
                         if not results:
                             return False
                         
-                        # Если зонд зафиксировал сетевой сбой (DNS, No Route)
                         probe_result = results[0].get("result", {})
                         if probe_result.get("status") == "failed":
                             return False
                             
-                        # Проверяем процент утерянных пакетов
                         stats = probe_result.get("stats", {})
                         loss = stats.get("loss", 100)
-                        return loss < 100 # True, если хотя бы один пакет успешно прошел ТСПУ
+                        return loss < 100
                         
                     elif status == "failed":
                         return False
@@ -462,7 +477,6 @@ def test_port_from_russia(host, port, timeout=12):
                 pass
         return False
     except Exception as e:
-        # В случае ошибок лимитов API возвращаем True как фолбек, чтобы не очистить подписку полностью
         print(f" [!] Ошибка связи с API Globalping ({e}). Фолбек: считаем узел временно доступным.")
         return True
 
@@ -513,13 +527,13 @@ def rename_vmess_config(raw_url, new_name):
     return f"vmess://{encoded}"
 
 # =====================================================================
-# ОБНОВЛЕННАЯ ФУНКЦИЯ ДВУХЭТАПНОЙ ПРОВЕРКИ
+# ОБНОВЛЕННАЯ ФУНКЦИЯ ДВУХЭТАПНОЙ ПРОВЕРКИ С ПЕРЕМЕШИВАНИЕМ КАНДИДАТОВ
 # =====================================================================
 def verify_configs_optimized(raw_configs, max_workers=25):
     if not raw_configs:
         return []
     
-    # Этап 1: Быстрая параллельная локальная проверка (из-за рубежа)
+    # 1. Быстрая параллельная локальная проверка
     alive_globally = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(check_tls_or_tcp_worker, r): r for r in raw_configs}
@@ -534,12 +548,14 @@ def verify_configs_optimized(raw_configs, max_workers=25):
     if not alive_globally:
         return []
         
-    # Этап 2: Проверка «выживших» из РФ через Globalping API
-    # Чтобы не упираться в лимиты бесплатного тарифа API, тестируем только первые 25 кандидатов
-    verified = []
-    candidates_to_check = alive_globally[:25]
+    # ПЕРЕМЕШИВАЕМ кандидатов перед отправкой в Globalping,
+    # чтобы при каждом запуске тестировались новые случайные конфиги.
+    random.shuffle(alive_globally)
     
-    print(f"[*] Локально доступны: {len(alive_globally)} шт. Проверка доступности из РФ через зонды...")
+    verified = []
+    candidates_to_check = alive_globally[:30] # Ограничение по лимитам Globalping
+    
+    print(f"[*] Локально доступны: {len(alive_globally)} шт. Проверка из РФ через eyeball-зонды (провайдеры домашнего интернета)...")
     for idx, conf in enumerate(candidates_to_check):
         host = conf["host"]
         port = conf["port"]
@@ -564,7 +580,6 @@ def process_special_ru_source():
     optimized_raw = pre_filter_raw_configs(unique_raw, max_per_country_pre=10)
     
     print(f"[*] Проверка {len(optimized_raw)} серверов из спец. источника...")
-    # Использует единую гибридную проверку
     alive_configs = verify_configs_optimized(optimized_raw)
                 
     ru_working_configs = []
@@ -599,7 +614,7 @@ def run_aggregation():
     selected_by_country = defaultdict(list)
     selected_raws = set()
     
-    # 1. ЗАГРУЖАЕМ И ПРОВЕРЯЕМ СТАРЫЕ КОНФИГУРАЦИИ
+    # 1. ЗАГРУЖАЕМ, ПЕРЕМЕШИВАЕМ И ПРОВЕРЯЕМ СТАРЫЕ КОНФИГУРАЦИИ
     old_configs = []
     if os.path.exists("subscription.txt"):
         try:
@@ -612,7 +627,9 @@ def run_aggregation():
     if old_configs:
         unique_old = list(set(old_configs))
         print(f"[*] Найдено {len(unique_old)} сохраненных конфигураций из предыдущей подписки.")
-        print("[*] Проверка старых конфигураций в первую очередь...")
+        print("[*] Перемешивание и проверка старых конфигураций в первую очередь...")
+        # Перемешиваем старые, чтобы каждый запуск тестировать разные
+        random.shuffle(unique_old)
         alive_old = verify_configs_optimized(unique_old)
         
         for conf in alive_old:
@@ -640,36 +657,14 @@ def run_aggregation():
             
         all_new_raws = list(set(new_raw_configs + special_ru_raws) - selected_raws)
         
-        raw_by_est_country = defaultdict(list)
-        raw_unknown = []
-        for r in all_new_raws:
-            parsed = parse_config(r)
-            if not parsed:
-                continue
-            est = detect_country_from_name(parsed["name"])
-            if est:
-                raw_by_est_country[est].append(r)
-            else:
-                raw_unknown.append(r)
-                
-        for country in raw_by_est_country:
-            random.shuffle(raw_by_est_country[country])
-        random.shuffle(raw_unknown)
-        
-        test_queue = []
-        index = 0
-        has_more = True
-        while has_more:
-            has_more = False
-            for country in list(raw_by_est_country.keys()):
-                if index < len(raw_by_est_country[country]):
-                    test_queue.append(raw_by_est_country[country][index])
-                    has_more = True
-            index += 1
-        test_queue.extend(raw_unknown)
+        # РЕШЕНИЕ ПРОБЛЕМЫ ОЧЕРЕДИ: Полностью объединяем всех новых кандидатов в один список
+        # и перемешиваем его случайным образом. Это ломает старый алгоритм, 
+        # уводивший безымянные конфиги в конец очереди.
+        test_queue = list(all_new_raws)
+        random.shuffle(test_queue)
         
         batch_size = 15
-        print(f"[*] Для тестирования доступно {len(test_queue)} новых кандидатов.")
+        print(f"[*] Для тестирования доступно {len(test_queue)} новых кандидатов (в случайном порядке).")
         print(f"[*] Начинаем порционный опрос пачками по {batch_size} до заполнения лимита...")
         
         for i in range(0, len(test_queue), batch_size):
@@ -718,7 +713,7 @@ def run_aggregation():
         "#profile-update-interval: 12",
         "#subscription-userinfo: upload=0; download=0; total=1073741824000; expire=1893014400",
         "#support-url: https://t.me/LetoVPN_free",  # Кликабельная кнопка-самолетик (например, ведет в Лето VPN)
-        # Описание под шкалой трафика (строго по вашему запросу, без кринжа)
+        # Описание под шкалой трафика
         "#announce: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры",
         "#description: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры"
     ]
@@ -735,12 +730,12 @@ def run_aggregation():
         
     with open("subscription.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(all_output_lines))
-    print("\n[+] Файл 'subscription.txt' успешно перезаписан с красивым оформлением.")
+    print("\n[+] Файл 'subscription.txt' успешно перезаписан.")
     
     base64_content = base64.b64encode("\n".join(all_output_lines).encode("utf-8")).decode("utf-8")
     with open("subscription_base64.txt", "w", encoding="utf-8") as f:
         f.write(base64_content)
-    print("[+] Файл 'subscription_base64.txt' успешно перезаписан с красивым оформлением.")
+    print("[+] Файл 'subscription_base64.txt' успешно перезаписан.")
 
 def scheduler_loop():
     interval = 1800
