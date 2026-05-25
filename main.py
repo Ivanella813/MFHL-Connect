@@ -801,7 +801,7 @@ def run_aggregation():
         "#profile-title: base64:TUZITCBDb25uZWN0",  # MFHL Connect в Base64
         "#profile-update-interval: 12",
         "#subscription-userinfo: upload=0; download=0; total=1073741824000; expire=1893014400",
-        "#support-url: https://t.me/LetoVPN_free",  # Кликабельная кнопка-самолетик
+        "#support-url: https://t.me/Amirka_TG",  # Кликабельная кнопка-самолетик
         # Описание под шкалой трафика
         "#announce: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры",
         "#description: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры"
