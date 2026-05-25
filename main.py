@@ -72,7 +72,8 @@ SPECIAL_RU_SOURCE = "https://raw.githubusercontent.com/igareck/vpn-configs-for-r
 # Общие источники (проверенные)
 RAW_URLS = [
     "https://raw.githubusercontent.com/adop1344-bot/LetoVPN_free/refs/heads/main/ru.txt",
-    "https://mifa.world/other"
+    "https://mifa.world/other",
+    "https://sub.fawlok.me/",
 ]
 
 CONFIG_REGEX = re.compile(r'(?:vless|vmess|ss|trojan|hysteria2|tuic)://[^\s"<]+')
