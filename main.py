@@ -49,16 +49,10 @@ LOCAL_FILE = "local_configs.txt"
 # Специфический источник (Белые списки РФ / обход блокировок)
 SPECIAL_RU_SOURCE = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
 
-# Общие Telegram-каналы для парсинга
-TELEGRAM_CHANNELS = [
-    "LetoVPN_free"
-]
-
 # Общие источники (проверенные)
 RAW_URLS = [
     "https://raw.githubusercontent.com/adop1344-bot/LetoVPN_free/refs/heads/main/ru.txt",
-    "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/Best-Results/proxies.txt",
-    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/Sub1.txt"
+    "https://mifa.world/other"
 ]
 
 CONFIG_REGEX = re.compile(r'(?:vless|vmess|ss|trojan|hysteria2|tuic)://[^\s"<]+')
@@ -72,11 +66,21 @@ GLOBALPING_TOKEN = os.getenv("GLOBALPING_TOKEN", "")
 
 def decode_if_base64(text):
     clean_text = text.strip()
-    if re.match(r'^[A-Za-z0-9+/=\s\n\r]+$', clean_text) and not clean_text.startswith("vless://") and not clean_text.startswith("vmess://") and len(clean_text) > 40:
+    # Удаляем лишние пробелы, переносы строк и табуляцию для корректной проверки base64
+    normalized_text = re.sub(r'\s+', '', clean_text)
+    
+    # Регулярное выражение для проверки символов base64 (включая url-safe алфавит)
+    if re.match(r'^[A-Za-z0-9+/=\-_]+$', normalized_text) and not normalized_text.startswith("vless://") and not normalized_text.startswith("vmess://") and len(normalized_text) > 40:
         try:
-            clean_text += "=" * ((4 - len(clean_text) % 4) % 4)
-            decoded = base64.b64decode(clean_text).decode('utf-8', errors='ignore')
-            return decoded
+            # Преобразуем url-safe base64 в стандартный формат
+            normalized_text = normalized_text.replace('-', '+').replace('_', '/')
+            # Выравниваем длину строки до кратной 4
+            normalized_text += "=" * ((4 - len(normalized_text) % 4) % 4)
+            decoded = base64.b64decode(normalized_text).decode('utf-8', errors='ignore')
+            
+            # Если декодированный текст действительно содержит конфигурации, возвращаем его
+            if CONFIG_REGEX.search(decoded):
+                return decoded
         except Exception:
             pass
     return text
@@ -85,8 +89,8 @@ def fetch_local_file():
     if not os.path.exists(LOCAL_FILE):
         try:
             with open(LOCAL_FILE, "w", encoding="utf-8") as f:
-                f.write("# Вставьте сюда скопированный текст из Telegram-групп (например, @russiawirevpn)\n")
-                f.write("# Скрипт автоматически извлечет из него ссылки при запуске!\n")
+                f.write("# Вставьте сюда скопированный текст из групп или готовую base64 подписку\n")
+                f.write("# Скрипт автоматически декодирует данные и извлечет из них ссылки при запуске!\n")
         except Exception:
             pass
         return []
@@ -94,6 +98,7 @@ def fetch_local_file():
     try:
         with open(LOCAL_FILE, "r", encoding="utf-8") as f:
             content = f.read()
+            content = decode_if_base64(content)
             configs = CONFIG_REGEX.findall(content)
             if configs:
                 print(f"[+] Из файла {LOCAL_FILE} успешно извлечено {len(configs)} конфигураций.")
@@ -114,21 +119,6 @@ def fetch_raw_url(url):
             return configs
     except Exception as e:
         print(f"[-] Ошибка загрузки {url}: {e}")
-        return []
-
-def fetch_telegram_channel(channel_username):
-    url = f"https://t.me/s/{channel_username}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            html_content = response.read().decode('utf-8', errors='ignore')
-            html_content = html.unescape(html_content)
-            configs = CONFIG_REGEX.findall(html_content)
-            print(f"[+] Из Telegram @{channel_username} извлечено {len(configs)} конфигураций.")
-            return configs
-    except Exception as e:
-        print(f"[-] Ошибка парсинга Telegram @{channel_username}: {e}")
         return []
 
 def decode_base64_vmess(vmess_str):
@@ -684,8 +674,6 @@ def run_aggregation():
         new_raw_configs.extend(fetch_local_file())
         special_ru_raws = fetch_raw_url(SPECIAL_RU_SOURCE)
         
-        for channel in TELEGRAM_CHANNELS:
-            new_raw_configs.extend(fetch_telegram_channel(channel))
         for url in RAW_URLS:
             new_raw_configs.extend(fetch_raw_url(url))
             
@@ -765,7 +753,7 @@ def run_aggregation():
         "#profile-title: base64:TUZITCBDb25uZWN0",  # MFHL Connect в Base64
         "#profile-update-interval: 12",
         "#subscription-userinfo: upload=0; download=0; total=1073741824000; expire=1893014400",
-        "#support-url: https://t.me/LetoVPN_free",  # Кликабельная кнопка-самолетик (например, ведет в Лето VPN)
+        "#support-url: https://t.me/LetoVPN_free",  # Кликабельная кнопка-самолетик
         # Описание под шкалой трафика
         "#announce: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры",
         "#description: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры"
