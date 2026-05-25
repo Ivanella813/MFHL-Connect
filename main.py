@@ -13,7 +13,7 @@ from urllib.parse import urlparse, unquote, quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =====================================================================
-# СЛОВАРЬ СТРАН (Определен на самом верху для предотвращения NameError)
+# СЛОВАРЬ СТРАН (Расширен для поддержки Латвии, Израиля, Венгрии и др.)
 # =====================================================================
 COUNTRY_INFO = {
     "RU": {"flag": "🇷🇺", "ru_name": "Россия"},
@@ -41,6 +41,26 @@ COUNTRY_INFO = {
     "RO": {"flag": "🇷🇴", "ru_name": "Румыния"},
     "BG": {"flag": "🇧🇬", "ru_name": "Болгария"},
     "KR": {"flag": "🇰🇷", "ru_name": "Южная Корея"},
+    "LV": {"flag": "🇱🇻", "ru_name": "Латвия"},
+    "IL": {"flag": "🇮🇱", "ru_name": "Израиль"},
+    "HU": {"flag": "🇭🇺", "ru_name": "Венгрия"},
+    "IS": {"flag": "🇮🇸", "ru_name": "Исландия"},
+    "CZ": {"flag": "🇨🇿", "ru_name": "Чехия"},
+    "IE": {"flag": "🇮🇪", "ru_name": "Ирландия"},
+    "IN": {"flag": "🇮🇳", "ru_name": "Индия"},
+    "PT": {"flag": "🇵🇹", "ru_name": "Португалия"},
+    "NO": {"flag": "🇳🇴", "ru_name": "Норвегия"},
+    "GR": {"flag": "🇬🇷", "ru_name": "Греция"},
+    "BE": {"flag": "🇧🇪", "ru_name": "Бельгия"},
+    "CY": {"flag": "🇨🇾", "ru_name": "Кипр"},
+    "MD": {"flag": "🇲🇩", "ru_name": "Молдова"},
+    "GE": {"flag": "🇬🇪", "ru_name": "Грузия"},
+    "AM": {"flag": "🇦🇲", "ru_name": "Армения"},
+    "AZ": {"flag": "🇦🇿", "ru_name": "Азербайджан"},
+    "AE": {"flag": "🇦🇪", "ru_name": "ОАЭ"},
+    "AU": {"flag": "🇦🇺", "ru_name": "Австралия"},
+    "BR": {"flag": "🇧🇷", "ru_name": "Бразилия"},
+    "ZA": {"flag": "🇿🇦", "ru_name": "ЮАР"},
 }
 
 # Название локального файла для копирования конфигов из чатов/групп
@@ -66,19 +86,13 @@ GLOBALPING_TOKEN = os.getenv("GLOBALPING_TOKEN", "")
 
 def decode_if_base64(text):
     clean_text = text.strip()
-    # Удаляем лишние пробелы, переносы строк и табуляцию для корректной проверки base64
     normalized_text = re.sub(r'\s+', '', clean_text)
     
-    # Регулярное выражение для проверки символов base64 (включая url-safe алфавит)
     if re.match(r'^[A-Za-z0-9+/=\-_]+$', normalized_text) and not normalized_text.startswith("vless://") and not normalized_text.startswith("vmess://") and len(normalized_text) > 40:
         try:
-            # Преобразуем url-safe base64 в стандартный формат
             normalized_text = normalized_text.replace('-', '+').replace('_', '/')
-            # Выравниваем длину строки до кратной 4
             normalized_text += "=" * ((4 - len(normalized_text) % 4) % 4)
             decoded = base64.b64decode(normalized_text).decode('utf-8', errors='ignore')
-            
-            # Если декодированный текст действительно содержит конфигурации, возвращаем его
             if CONFIG_REGEX.search(decoded):
                 return decoded
         except Exception:
@@ -147,6 +161,7 @@ def parse_config(config_str):
                     "host": data.get("add"),
                     "port": int(data.get("port", 443)),
                     "name": data.get("ps", ""),
+                    "credentials": data.get("id", ""),
                     "is_tls": is_tls,
                     "is_ws": is_ws,
                     "path": path,
@@ -158,8 +173,9 @@ def parse_config(config_str):
             parsed = urlparse(config_str)
             protocol = parsed.scheme
             netloc = parsed.netloc
+            credentials = ""
             if "@" in netloc:
-                _, host_port = netloc.rsplit("@", 1)
+                credentials, host_port = netloc.rsplit("@", 1)
             else:
                 host_port = netloc
             
@@ -202,6 +218,7 @@ def parse_config(config_str):
                 "host": host,
                 "port": port,
                 "name": name,
+                "credentials": credentials,
                 "is_tls": is_tls,
                 "sni": sni,
                 "is_ws": is_ws,
@@ -213,6 +230,41 @@ def parse_config(config_str):
         pass
     return None
 
+# =====================================================================
+# УМНЫЙ ПОИСК ДУБЛИКАТОВ БЭКЕНДОВ (Удаление клонов на CDN)
+# =====================================================================
+def get_backend_fingerprint(parsed):
+    protocol = parsed["protocol"]
+    credentials = parsed.get("credentials", "")
+    host = parsed["host"]
+    port = parsed["port"]
+    sni = parsed.get("sni")
+    path = parsed.get("path", "/")
+    is_ws = parsed.get("is_ws", False)
+    
+    raw_lower = parsed.get("raw", "").lower()
+    is_cdn = is_ws or "grpc" in raw_lower or "httpupgrade" in raw_lower
+    
+    if is_cdn and sni:
+        # Для CDN-воркеров бэкенд определяется по SNI, паролю и пути
+        return (protocol, credentials, sni.lower(), path)
+    else:
+        # Для прямых Reality серверов бэкендом выступает непосредственно хост VPS
+        return (protocol, credentials, host.lower(), port)
+
+def deduplicate_raw_configs(raw_configs):
+    seen_fingerprints = set()
+    unique_configs = []
+    for raw in raw_configs:
+        parsed = parse_config(raw)
+        if not parsed:
+            continue
+        fingerprint = get_backend_fingerprint(parsed)
+        if fingerprint not in seen_fingerprints:
+            seen_fingerprints.add(fingerprint)
+            unique_configs.append(raw)
+    return unique_configs
+
 def detect_country_from_name(name):
     if not name:
         return None
@@ -222,7 +274,11 @@ def detect_country_from_name(name):
         "🇷🇺": "RU", "🇺🇸": "US", "🇩🇪": "DE", "🇳🇱": "NL", "🇫🇮": "FI", 
         "🇬🇧": "GB", "🇫🇷": "FR", "🇵🇱": "PL", "🇰🇿": "KZ", "🇧🇾": "BY", 
         "🇹🇷": "TR", "🇸🇬": "SG", "🇯🇵": "JP", "🇸🇪": "SE", "🇨🇦": "CA",
-        "🇪🇪": "EE", "🇰🇷": "KR"
+        "🇪🇪": "EE", "🇰🇷": "KR", "🇱🇻": "LV", "🇮🇱": "IL", "🇭🇺": "HU",
+        "🇮🇸": "IS", "🇨🇿": "CZ", "🇮🇪": "IE", "🇮🇳": "IN", "🇵🇹": "PT",
+        "🇳🇴": "NO", "🇬🇷": "GR", "🇧🇪": "BE", "🇨🇾": "CY", "🇲🇩": "MD",
+        "🇬🇪": "GE", "🇦🇲": "AM", "🇦🇿": "AZ", "🇦🇪": "AE", "🇦🇺": "AU",
+        "🇧🇷": "BR", "🇿🇦": "ZA"
     }
     for flag, code in country_flags.items():
         if flag in name:
@@ -244,6 +300,11 @@ def detect_country_from_name(name):
         "EE": r"\b(EE|EST|ESTONIA|ЭСТОНИЯ)\b",
         "SE": r"\b(SE|SWE|SWEDEN|ШВЕЦИЯ)\b",
         "KR": r"\b(KR|KOR|KOREA|КОРЕЯ|СЕУЛ)\b",
+        "LV": r"\b(LV|LAT|LATVIA|ЛАТВИЯ|РИГА)\b",
+        "IL": r"\b(IL|ISR|ISRAEL|ИЗРАИЛЬ|ТЕЛ\s*-?\s*АВИВ)\b",
+        "HU": r"\b(HU|HUN|HUNGARY|ВЕНГРИЯ|БУДАПЕШТ)\b",
+        "CZ": r"\b(CZ|CZE|CZECH|ЧЕХИЯ|ПРАГА)\b",
+        "IN": r"\b(IN|IND|INDIA|ИНДИЯ)\b",
     }
     
     for country, pattern in patterns.items():
@@ -471,29 +532,15 @@ def test_port_from_russia(host, port, timeout=12):
 def get_rename_tag(country_code, index):
     global COUNTRY_INFO
     
-    local_info = {
-        "RU": "Россия", "US": "США", "DE": "Германия", "NL": "Нидерланды",
-        "FI": "Финляндия", "GB": "Великобритания", "FR": "Франция", "PL": "Польша",
-        "KZ": "Казахстан", "TR": "Турция", "SG": "Сингапур", "JP": "Япония",
-        "EE": "Эстония", "SE": "Швеция", "CA": "Канада", "BY": "Беларусь",
-        "HK": "Гонконг", "CH": "Швейцария", "AT": "Австрия", "ES": "Испания",
-        "IT": "Италия", "UA": "Украина", "RO": "Румыния", "BG": "Болгария",
-        "KR": "Южная Корея"
-    }
-    
-    try:
-        info = COUNTRY_INFO.get(country_code)
-    except NameError:
-        info = None
-        
+    info = COUNTRY_INFO.get(country_code)
     if info:
         return f"{info['flag']} {info['ru_name']} #{index}"
     else:
-        ru_name = local_info.get(country_code, country_code)
+        # Если страна отсутствует в базе, собираем флаг автоматически из ее ISO-кода
         if len(country_code) == 2 and country_code != "UN" and country_code != "Unknown":
             try:
                 flag = "".join(chr(127397 + ord(c)) for c in country_code)
-                return f"{flag} {ru_name} #{index}"
+                return f"{flag} {country_code} #{index}"
             except Exception:
                 pass
         return f"🌐 Unknown #{index}"
@@ -650,8 +697,9 @@ def run_aggregation():
             pass
             
     if old_configs:
-        unique_old = list(set(old_configs))
-        print(f"[*] Найдено {len(unique_old)} сохраненных конфигураций из предыдущей подписки.")
+        # Применяем фильтрацию дубликатов бэкендов на старых конфигах
+        unique_old = deduplicate_raw_configs(list(set(old_configs)))
+        print(f"[*] Найдено {len(unique_old)} уникальных бэкендов из предыдущей подписки.")
         print("[*] Перемешивание и проверка старых конфигураций в первую очередь...")
         random.shuffle(unique_old)
         alive_old = verify_configs_optimized(unique_old, selected_by_country=selected_by_country)
@@ -679,12 +727,14 @@ def run_aggregation():
             
         all_new_raws = list(set(new_raw_configs + special_ru_raws) - selected_raws)
         
-        # Полностью перемешиваем всех новых кандидатов в один случайный пул
+        # Фильтруем все собранные за раз новые ссылки на дубли бэкендов, чтобы не проверять одно и то же
+        all_new_raws = deduplicate_raw_configs(all_new_raws)
+        
         test_queue = list(all_new_raws)
         random.shuffle(test_queue)
         
         batch_size = 15
-        print(f"[*] Для тестирования доступно {len(test_queue)} новых кандидатов (в случайном порядке).")
+        print(f"[*] Для тестирования доступно {len(test_queue)} новых уникальных кандидатов.")
         print(f"[*] Начинаем порционный опрос пачками по {batch_size} до заполнения лимита...")
         
         test_queue_index = 0
@@ -692,8 +742,6 @@ def run_aggregation():
             if len(selected_raws) >= 50:
                 break
                 
-            # Собираем пачку из 15 кандидатов, предварительно отсекая те страны, 
-            # по которым лимит в 5 штук уже давно собран (не тратим время на парсинг и сокеты)
             batch = []
             while len(batch) < batch_size and test_queue_index < len(test_queue):
                 raw_conf = test_queue[test_queue_index]
@@ -713,7 +761,7 @@ def run_aggregation():
             if not batch:
                 break
                 
-            print(f"[*] Проверка пачки из {len(batch)} новых кандидатов (WebSocket Handshake / TLS)...")
+            print(f"[*] Проверка пачки из {len(batch)} новых кандидатов...")
             verified_batch = verify_configs_optimized(batch, selected_by_country=selected_by_country)
             
             for conf in verified_batch:
@@ -721,7 +769,7 @@ def run_aggregation():
                 if len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                     selected_by_country[country].append(conf)
                     selected_raws.add(conf["raw"])
-                    print(f"    [+] Добавлен новый сервер: {conf['protocol']}://{conf['host']}:{conf['port']} ({country})")
+                    print(f"    [+] Добавлен новый уникальный сервер: {conf['protocol']}://{conf['host']}:{conf['port']} ({country})")
                     
                 if len(selected_raws) >= 50:
                     break
@@ -753,7 +801,7 @@ def run_aggregation():
         "#profile-title: base64:TUZITCBDb25uZWN0",  # MFHL Connect в Base64
         "#profile-update-interval: 12",
         "#subscription-userinfo: upload=0; download=0; total=1073741824000; expire=1893014400",
-        "#support-url: https://t.me/Amirka_TG",  # Кликабельная кнопка-самолетик
+        "#support-url: https://t.me/LetoVPN_free",  # Кликабельная кнопка-самолетик
         # Описание под шкалой трафика
         "#announce: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры",
         "#description: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры"
