@@ -82,7 +82,7 @@ GEOIP_CACHE = {}
 geoip_calls_count = 0
 MAX_GEOIP_CALLS = 40
 
-# Переменная токена для Globalping (приоритет из ENV, иначе используется ваш предоставленный токен)
+# Переменная токена для Globalping
 GLOBALPING_TOKEN = os.getenv("GLOBALPING_TOKEN", "ozuwucpiutcobvnboqlrpxt6nggf2jqv")
 
 def decode_if_base64(text):
@@ -247,10 +247,8 @@ def get_backend_fingerprint(parsed):
     is_cdn = is_ws or "grpc" in raw_lower or "httpupgrade" in raw_lower
     
     if is_cdn and sni:
-        # Для CDN-воркеров бэкенд определяется по SNI, паролю и пути
         return (protocol, credentials, sni.lower(), path)
     else:
-        # Для прямых Reality серверов бэкендом выступает непосредственно хост VPS
         return (protocol, credentials, host.lower(), port)
 
 def deduplicate_raw_configs(raw_configs):
@@ -468,14 +466,12 @@ def get_country_code(ip, name):
     return "Unknown"
 
 # =====================================================================
-# ИСПРАВЛЕННАЯ ПРОВЕРКА ЧЕРЕЗ RU+EYEBALL ЗОНДЫ (ДОМАШНИЙ ИНТЕРНЕТ РФ)
+# ПРОВЕРКА ЧЕРЕЗ RU+EYEBALL ЗОНДЫ (ДОМАШНИЙ ИНТЕРНЕТ РФ)
 # =====================================================================
 def test_port_from_russia(host, port, timeout=12, is_tls=True):
     url = "https://api.globalping.io/v1/measurements"
     
-    # Если протокол защищен TLS (Reality, Trojan, TLS), используем HTTP/HTTPS проверку.
-    # Это вынуждает зонд провести полноценное TLS рукопожатие, которое ТСПУ может заблокировать.
-    # Если протокол не использует TLS (Shadowsocks, Hysteria2 и др.), используем стандартный TCP Ping.
+    # ИСПРАВЛЕНО: параметры "method" и "path" теперь вложены в "request"
     if is_tls:
         payload = {
             "type": "http",
@@ -485,8 +481,10 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True):
             "measurementOptions": {
                 "port": int(port),
                 "protocol": "HTTPS",
-                "method": "GET",
-                "path": "/"
+                "request": {
+                    "method": "GET",
+                    "path": "/"
+                }
             }
         }
     else:
@@ -535,8 +533,6 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True):
                         probe_result = results[0].get("result", {})
                         
                         if is_tls:
-                            # HTTP проверка успешна, если соединение не "failed".
-                            # ТСПУ блокирует handshake сбросом сессии (connection reset) или таймаутом, что вызовет статус "failed".
                             return probe_result.get("status") != "failed"
                         else:
                             if probe_result.get("status") == "failed":
@@ -551,7 +547,6 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True):
                 pass
         return False
     except Exception as e:
-        # ПРЕДОТВРАЩЕНИЕ ЛОЖНЫХ СРАБАТЫВАНИЙ: Возвращаем False при сбое API.
         print(f" [!] Ошибка связи с API Globalping ({e}). Возвращаем False (узел помечен временно недоступным).")
         return False
 
@@ -562,7 +557,6 @@ def get_rename_tag(country_code, index):
     if info:
         return f"{info['flag']} {info['ru_name']} #{index}"
     else:
-        # Если страна отсутствует в базе, собираем флаг автоматически из ее ISO-кода
         if len(country_code) == 2 and country_code != "UN" and country_code != "Unknown":
             try:
                 flag = "".join(chr(127397 + ord(c)) for c in country_code)
@@ -594,7 +588,6 @@ def check_ru_accessibility_worker(conf):
     host = conf["host"]
     port = conf["port"]
     is_tls = conf.get("is_tls", False)
-    # Пробрасываем признак TLS, чтобы использовать качественную проверку HTTP
     is_alive_in_ru = test_port_from_russia(host, port, is_tls=is_tls)
     if is_alive_in_ru:
         return conf
@@ -607,7 +600,6 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
     if not raw_configs:
         return []
     
-    # 1. Быстрая параллельная локальная проверка (из-за рубежа)
     alive_globally = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(check_tls_or_tcp_worker, r): r for r in raw_configs}
@@ -624,7 +616,6 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
         
     random.shuffle(alive_globally)
     
-    # Дедупликация хостов/портов в текущей пачке, чтобы не слать дубли в API
     seen = set()
     deduped_alive = []
     for conf in alive_globally:
@@ -634,15 +625,11 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
             deduped_alive.append(conf)
     alive_globally = deduped_alive
     
-    # Определение стран для "выживших" локально узлов и жесткий отсев
-    # тех, по которым лимит подписки (5 шт) уже полностью забит!
     filtered_candidates = []
     for conf in alive_globally:
         country = get_country_code(conf["ip"], conf["name"])
         conf["country"] = country
         
-        # Если эта страна в подписке уже заполнена (накоплено 5 штук), 
-        # пропускаем узел и даже не отправляем его на платный по времени тест в Globalping!
         if selected_by_country and len(selected_by_country[country]) >= 5:
             continue
             
@@ -651,13 +638,11 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
     if not filtered_candidates:
         return []
         
-    # Будем проверять за раз не более 15 реально необходимых кандидатов
     candidates_to_check = filtered_candidates[:15]
     
     print(f"[*] Локально доступны: {len(alive_globally)} шт. (после фильтрации забитых стран осталось: {len(filtered_candidates)} шт.)")
     print(f"[*] Запуск параллельной проверки {len(candidates_to_check)} узлов из РФ через eyeball-зонды...")
     
-    # 2. МНОГОПОТОЧНЫЙ запуск тестов Globalping (дает ускорение x10-x15)
     verified = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(check_ru_accessibility_worker, conf): conf for conf in candidates_to_check}
@@ -725,7 +710,6 @@ def run_aggregation():
             pass
             
     if old_configs:
-        # Применяем фильтрацию дубликатов бэкендов на старых конфигах
         unique_old = deduplicate_raw_configs(list(set(old_configs)))
         print(f"[*] Найдено {len(unique_old)} уникальных бэкендов из предыдущей подписки.")
         print("[*] Перемешивание и проверка старых конфигураций в первую очередь...")
@@ -754,8 +738,6 @@ def run_aggregation():
             new_raw_configs.extend(fetch_raw_url(url))
             
         all_new_raws = list(set(new_raw_configs + special_ru_raws) - selected_raws)
-        
-        # Фильтруем все собранные за раз новые ссылки на дубли бэкендов, чтобы не проверять одно и то же
         all_new_raws = deduplicate_raw_configs(all_new_raws)
         
         test_queue = list(all_new_raws)
@@ -779,7 +761,6 @@ def run_aggregation():
                 if not parsed:
                     continue
                 
-                # Быстрая оценка страны по названию в ссылке
                 est_country = detect_country_from_name(parsed["name"])
                 if est_country and len(selected_by_country[est_country]) >= 5:
                     continue
