@@ -396,6 +396,76 @@ def get_country_code(ip, name):
         
     return "Unknown"
 
+# =====================================================================
+# НОВЫЙ ФУНКЦИОНАЛ: ПРОВЕРКА ДОСТУПНОСТИ ИЗ РФ ЧЕРЕЗ GLOBALPING API
+# =====================================================================
+def test_port_from_russia(host, port, timeout=12):
+    """
+    Проверяет доступность хоста и порта из России с помощью бесплатного API Globalping.
+    Использует TCP-пинг из зондов, физически расположенных в РФ.
+    """
+    url = "https://api.globalping.io/v1/measurements"
+    payload = {
+        "type": "ping",
+        "target": host,
+        "locations": [{"country": "RU"}], # Ограничиваем тесты только зондами внутри РФ
+        "limit": 1,
+        "measurementOptions": {
+            "protocol": "TCP",
+            "port": int(port),
+            "packets": 2
+        }
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    try:
+        # 1. Создаем запрос на измерение
+        req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            res = json.loads(r.read().decode('utf-8'))
+            m_id = res.get("id")
+            if not m_id:
+                return False
+                
+        # 2. Опрашиваем результат
+        poll_url = f"https://api.globalping.io/v1/measurements/{m_id}"
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            time.sleep(1.5)
+            poll_req = urllib.request.Request(poll_url, headers={"User-Agent": headers["User-Agent"]})
+            try:
+                with urllib.request.urlopen(poll_req, timeout=4) as pr:
+                    poll_res = json.loads(pr.read().decode('utf-8'))
+                    status = poll_res.get("status")
+                    
+                    if status == "finished":
+                        results = poll_res.get("results", [])
+                        if not results:
+                            return False
+                        
+                        # Если зонд зафиксировал сетевой сбой (DNS, No Route)
+                        probe_result = results[0].get("result", {})
+                        if probe_result.get("status") == "failed":
+                            return False
+                            
+                        # Проверяем процент утерянных пакетов
+                        stats = probe_result.get("stats", {})
+                        loss = stats.get("loss", 100)
+                        return loss < 100 # True, если хотя бы один пакет успешно прошел ТСПУ
+                        
+                    elif status == "failed":
+                        return False
+            except Exception:
+                pass
+        return False
+    except Exception as e:
+        # В случае ошибок лимитов API возвращаем True как фолбек, чтобы не очистить подписку полностью
+        print(f" [!] Ошибка связи с API Globalping ({e}). Фолбек: считаем узел временно доступным.")
+        return True
+
 def get_rename_tag(country_code, index):
     global COUNTRY_INFO
     
@@ -442,27 +512,48 @@ def rename_vmess_config(raw_url, new_name):
     encoded = base64.b64encode(json_str.encode("utf-8")).decode("utf-8")
     return f"vmess://{encoded}"
 
+# =====================================================================
+# ОБНОВЛЕННАЯ ФУНКЦИЯ ДВУХЭТАПНОЙ ПРОВЕРКИ
+# =====================================================================
 def verify_configs_optimized(raw_configs, max_workers=25):
     if not raw_configs:
         return []
-    alive_configs = []
     
+    # Этап 1: Быстрая параллельная локальная проверка (из-за рубежа)
+    alive_globally = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(check_tls_or_tcp_worker, r): r for r in raw_configs}
         for future in as_completed(futures):
             try:
                 res = future.result()
                 if res:
-                    alive_configs.append(res)
+                    alive_globally.append(res)
             except Exception:
                 pass
                 
-    verified = []
-    for conf in alive_configs:
-        country = get_country_code(conf["ip"], conf["name"])
-        conf["country"] = country
-        verified.append(conf)
+    if not alive_globally:
+        return []
         
+    # Этап 2: Проверка «выживших» из РФ через Globalping API
+    # Чтобы не упираться в лимиты бесплатного тарифа API, тестируем только первые 25 кандидатов
+    verified = []
+    candidates_to_check = alive_globally[:25]
+    
+    print(f"[*] Локально доступны: {len(alive_globally)} шт. Проверка доступности из РФ через зонды...")
+    for idx, conf in enumerate(candidates_to_check):
+        host = conf["host"]
+        port = conf["port"]
+        print(f"    [{idx+1}/{len(candidates_to_check)}] Тест {host}:{port}... ", end="", flush=True)
+        
+        is_alive_in_ru = test_port_from_russia(host, port)
+        if is_alive_in_ru:
+            print("✅ РАБОТАЕТ В РФ")
+            country = get_country_code(conf["ip"], conf["name"])
+            conf["country"] = country
+            verified.append(conf)
+        else:
+            print("❌ ЗАБЛОКИРОВАН ТСПУ")
+            
     return verified
 
 def process_special_ru_source():
@@ -472,25 +563,16 @@ def process_special_ru_source():
     
     optimized_raw = pre_filter_raw_configs(unique_raw, max_per_country_pre=10)
     
-    print(f"[*] Проверка {len(optimized_raw)} серверов из спец. источника в многопоточном режиме...")
-    alive_configs = []
-    with ThreadPoolExecutor(max_workers=25) as executor:
-        futures = {executor.submit(check_tls_or_tcp_worker, r): r for r in optimized_raw}
-        for future in as_completed(futures):
-            try:
-                res = future.result()
-                if res:
-                    alive_configs.append(res)
-            except Exception:
-                pass
+    print(f"[*] Проверка {len(optimized_raw)} серверов из спец. источника...")
+    # Использует единую гибридную проверку
+    alive_configs = verify_configs_optimized(optimized_raw)
                 
     ru_working_configs = []
     fallback_working_configs = []
     
     print("[*] Определение геолокации для спец. источника...")
     for conf in alive_configs:
-        country = get_country_code(conf["ip"], conf["name"])
-        conf["country"] = country
+        country = conf["country"]
         
         if country == "RU":
             ru_working_configs.append(conf)
