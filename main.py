@@ -23,46 +23,31 @@ TELEGRAM_CHANNELS = [
     "LetoVPN_free"
 ]
 
-# Общие проверенные GitHub-источники
+# ВОЗВРАЩЕНЫ ИСХОДНЫЕ ИСТОЧНИКИ (как вы и просили)
 RAW_URLS = [
     "https://raw.githubusercontent.com/adop1344-bot/LetoVPN_free/refs/heads/main/ru.txt",
     "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/Best-Results/proxies.txt",
     "https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/Sub1.txt"
 ]
 
-COUNTRY_INFO = {
-    "RU": {"flag": "🇷🇺", "ru_name": "Россия"},
-    "US": {"flag": "🇺🇸", "ru_name": "США"},
-    "DE": {"flag": "🇩🇪", "ru_name": "Германия"},
-    "NL": {"flag": "🇳🇱", "ru_name": "Нидерланды"},
-    "FI": {"flag": "🇫🇮", "ru_name": "Финляндия"},
-    "GB": {"flag": "🇬🇧", "ru_name": "Великобритания"},
-    "FR": {"flag": "🇫🇷", "ru_name": "Франция"},
-    "PL": {"flag": "🇵🇱", "ru_name": "Польша"},
-    "KZ": {"flag": "🇰🇿", "ru_name": "Казахстан"},
-    "TR": {"flag": "🇹🇷", "ru_name": "Турция"},
-    "SG": {"flag": "🇸🇬", "ru_name": "Сингапур"},
-    "JP": {"flag": "🇯🇵", "ru_name": "Япония"},
-    "EE": {"flag": "🇪🇪", "ru_name": "Эстония"},
-    "SE": {"flag": "🇸🇪", "ru_name": "Швеция"},
-    "CA": {"flag": "🇨🇦", "ru_name": "Канада"},
-    "BY": {"flag": "🇧🇾", "ru_name": "Беларусь"},
-    "HK": {"flag": "🇭🇰", "ru_name": "Гонконг"},
-    "CH": {"flag": "🇨🇭", "ru_name": "Швейцария"},
-    "AT": {"flag": "🇦🇹", "ru_name": "Австрия"},
-    "ES": {"flag": "🇪🇸", "ru_name": "Испания"},
-    "IT": {"flag": "🇮🇹", "ru_name": "Италия"},
-    "UA": {"flag": "🇺🇦", "ru_name": "Украина"},
-    "RO": {"flag": "🇷🇴", "ru_name": "Румыния"},
-    "BG": {"flag": "🇧🇬", "ru_name": "Болгария"},
-    "KR": {"flag": "🇰🇷", "ru_name": "Южная Корея"},
-}
-
+# Корректное регулярное выражение для поиска полных ссылок
 CONFIG_REGEX = re.compile(r'(?:vless|vmess|ss|trojan|hysteria2|tuic)://[^\s"<]+')
 
 GEOIP_CACHE = {}
 geoip_calls_count = 0
 MAX_GEOIP_CALLS = 40
+
+def decode_if_base64(text):
+    """Декодирует текст, если он зашифрован в Base64."""
+    clean_text = text.strip()
+    if re.match(r'^[A-Za-z0-9+/=\s\n\r]+$', clean_text) and not clean_text.startswith("vless://") and not clean_text.startswith("vmess://") and len(clean_text) > 40:
+        try:
+            clean_text += "=" * ((4 - len(clean_text) % 4) % 4)
+            decoded = base64.b64decode(clean_text).decode('utf-8', errors='ignore')
+            return decoded
+        except Exception:
+            pass
+    return text
 
 def fetch_local_file():
     if not os.path.exists(LOCAL_FILE):
@@ -91,6 +76,7 @@ def fetch_raw_url(url):
     try:
         with urllib.request.urlopen(req, timeout=10) as response:
             content = response.read().decode('utf-8', errors='ignore')
+            content = decode_if_base64(content)  # Распознаем шифрование Base64 подписок
             configs = CONFIG_REGEX.findall(content)
             print(f"[+] Из источника {url[:60]}... извлечено {len(configs)} конфигураций.")
             return configs
@@ -124,16 +110,26 @@ def decode_base64_vmess(vmess_str):
 
 def parse_config(config_str):
     try:
+        # Игнорируем визуальные заглушки-карточки при повторном анализе
+        if "127.0.0.1" in config_str or "localhost" in config_str:
+            return None
+            
         if config_str.startswith("vmess://"):
             data = decode_base64_vmess(config_str)
             if data:
                 is_tls = data.get("tls") == "tls"
+                is_ws = data.get("net") == "ws"
+                path = data.get("path", "/")
+                host_header = data.get("host")
                 return {
                     "protocol": "vmess",
                     "host": data.get("add"),
                     "port": int(data.get("port", 443)),
                     "name": data.get("ps", ""),
                     "is_tls": is_tls,
+                    "is_ws": is_ws,
+                    "path": path,
+                    "host_header": host_header,
                     "sni": data.get("sni"),
                     "raw": config_str
                 }
@@ -157,6 +153,10 @@ def parse_config(config_str):
             
             is_tls = False
             sni = None
+            is_ws = False
+            path = "/"
+            host_header = None
+            
             if parsed.query:
                 try:
                     params = dict(x.split("=", 1) for x in parsed.query.split("&") if "=" in x)
@@ -164,6 +164,13 @@ def parse_config(config_str):
                     if security in ["tls", "reality"]:
                         is_tls = True
                     sni = params.get("sni")
+                    
+                    # WebSocket параметры
+                    transport_type = params.get("type", "").lower()
+                    if transport_type == "ws":
+                        is_ws = True
+                    path = params.get("path", "/")
+                    host_header = params.get("host")
                 except Exception:
                     pass
             
@@ -177,6 +184,9 @@ def parse_config(config_str):
                 "name": name,
                 "is_tls": is_tls,
                 "sni": sni,
+                "is_ws": is_ws,
+                "path": path,
+                "host_header": host_header,
                 "raw": config_str
             }
     except Exception:
@@ -242,16 +252,63 @@ def pre_filter_raw_configs(raw_strings, max_per_country_pre=10):
     pre_selected.extend(unknown_list[:40])
     return list(set(pre_selected))
 
-def test_node_connection(host, port, protocol, is_tls=False, sni=None, timeout=2.5):
+def test_websocket_node(ip, port, is_tls, host, path, host_header=None, timeout=2.5):
     """
-    Проверяет сервер.
-    Для TLS протоколов совершает настоящее TLS-рукопожатие с SNI.
-    Для не-TLS использует быстрый TCP Handshake.
+    «По уму»: Выполняет реальное HTTP-рукопожатие для WebSocket-узлов.
+    Отсекает мертвые бэкенды за «живым» прокси Cloudflare.
     """
+    if not host_header:
+        host_header = host
+    if not path:
+        path = "/"
+    if not path.startswith("/"):
+        path = "/" + path
+        
+    req = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host_header}\r\n"
+        f"Upgrade: websocket\r\n"
+        f"Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        f"Sec-WebSocket-Version: 13\r\n\r\n"
+    )
+    
+    try:
+        if is_tls:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((ip, port), timeout=timeout) as sock:
+                with context.wrap_socket(sock, server_hostname=host_header) as ssl_sock:
+                    ssl_sock.sendall(req.encode('utf-8'))
+                    res = ssl_sock.recv(1024).decode('utf-8', errors='ignore')
+        else:
+            with socket.create_connection((ip, port), timeout=timeout) as sock:
+                sock.sendall(req.encode('utf-8'))
+                res = sock.recv(1024).decode('utf-8', errors='ignore')
+                
+        # Если бэкенд жив, он вернет 101 Switching Protocols.
+        # В случае ошибки авторизации Xray может вернуть 400 Bad Request (но это означает, что бэкенд ОТВЕТИЛ).
+        # Ошибки 502, 503, 403, 404 — бэкенд мертв.
+        if "HTTP/1.1 101" in res:
+            return True
+        if "HTTP/1.1 400" in res and "cloudflare" not in res.lower():
+            return True
+            
+        return False
+    except Exception:
+        return False
+
+def test_node_connection(host, port, protocol, is_tls=False, sni=None, is_ws=False, path=None, host_header=None, timeout=2.5):
     try:
         ip = socket.gethostbyname(host)
     except socket.gaierror:
         return None
+        
+    if is_ws:
+        # Для WebSocket-протоколов выполняем углубленную проверку рукопожатия
+        success = test_websocket_node(ip, port, is_tls, host, path, host_header, timeout)
+        return ip if success else None
         
     if is_tls:
         try:
@@ -261,7 +318,7 @@ def test_node_connection(host, port, protocol, is_tls=False, sni=None, timeout=2
             
             with socket.create_connection((ip, port), timeout=timeout) as sock:
                 with context.wrap_socket(sock, server_hostname=sni if sni else host) as ssl_sock:
-                    return ip  # TLS рукопожатие успешно пройдено
+                    return ip
         except Exception:
             return None
     else:
@@ -281,6 +338,9 @@ def check_tls_or_tcp_worker(raw_conf):
         protocol=parsed["protocol"],
         is_tls=parsed.get("is_tls", False),
         sni=parsed.get("sni"),
+        is_ws=parsed.get("is_ws", False),
+        path=parsed.get("path", "/"),
+        host_header=parsed.get("host_header"),
         timeout=2.5
     )
     if ip:
@@ -369,6 +429,51 @@ def verify_configs_optimized(raw_configs, max_workers=25):
         
     return verified
 
+def process_special_ru_source():
+    print(f"\n[*] Специфический сбор из источника: {SPECIAL_RU_SOURCE}")
+    raw_configs = fetch_raw_url(SPECIAL_RU_SOURCE)
+    unique_raw = list(set(raw_configs))
+    
+    optimized_raw = pre_filter_raw_configs(unique_raw, max_per_country_pre=10)
+    
+    print(f"[*] Проверка {len(optimized_raw)} серверов из спец. источника в многопоточном режиме...")
+    alive_configs = []
+    with ThreadPoolExecutor(max_workers=25) as executor:
+        futures = {executor.submit(check_tls_or_tcp_worker, r): r for r in optimized_raw}
+        for future in as_completed(futures):
+            try:
+                res = future.result()
+                if res:
+                    alive_configs.append(res)
+            except Exception:
+                pass
+                
+    ru_working_configs = []
+    fallback_working_configs = []
+    
+    print("[*] Определение геолокации для спец. источника...")
+    for conf in alive_configs:
+        country = get_country_code(conf["ip"], conf["name"])
+        conf["country"] = country
+        
+        if country == "RU":
+            ru_working_configs.append(conf)
+            print(f"    [+] Найдено RU из спец. источника: {conf['protocol']}://{conf['host']}:{conf['port']}")
+            if len(ru_working_configs) >= 5:
+                break
+        else:
+            fallback_working_configs.append(conf)
+            
+    if len(ru_working_configs) < 5:
+        needed = 5 - len(ru_working_configs)
+        print(f"[!] В РФ физически находится только {len(ru_working_configs)} рабочих узлов.")
+        print(f"[*] Добираем еще {needed} рабочих узлов из этого же оптимизированного под РФ файла...")
+        for conf in fallback_working_configs[:needed]:
+            ru_working_configs.append(conf)
+            print(f"    [+] Добавлен резервный рабочий узел ({conf['country']}): {conf['protocol']}://{conf['host']}:{conf['port']}")
+            
+    return ru_working_configs[:5]
+
 def run_aggregation():
     global geoip_calls_count
     geoip_calls_count = 0
@@ -394,18 +499,17 @@ def run_aggregation():
         
         for conf in alive_old:
             country = conf["country"]
-            # Заполняем квоту: макс 5 на страну, макс 50 всего
             if len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                 selected_by_country[country].append(conf)
                 selected_raws.add(conf["raw"])
-                print(f"    [+] Старый сервер всё еще РАБОТАЕТ и сохранен: {conf['protocol']}://{conf['host']}:{conf['port']} ({country})")
+                print(f"    [+] Старый рабочий сервер сохранен: {conf['protocol']}://{conf['host']}:{conf['port']} ({country})")
                 
     total_selected = len(selected_raws)
     print(f"[*] После проверки старой подписки сохранено рабочих узлов: {total_selected}/50.")
     
     # 2. ЕСЛИ УЗЛОВ МЕНЬШЕ 50 — ДОБИРАЕМ ИЗ НОВЫХ ИСТОЧНИКОВ (ЛЕНИВОЕ ТЕСТИРОВАНИЕ)
     if total_selected < 50:
-        print("[*] Начинаем сбор новых конфигураций для добора до лимита в 50 штук...")
+        print("[*] Начинаем сбор новых конфигураций для добора...")
         new_raw_configs = []
         
         # Считываем локальные файлы
@@ -441,7 +545,7 @@ def run_aggregation():
             random.shuffle(raw_by_est_country[country])
         random.shuffle(raw_unknown)
         
-        # Чередуем их в общую очередь (Round-Robin), чтобы равномерно проверять разные страны
+        # Чередуем их в общую очередь (Round-Robin)
         test_queue = []
         index = 0
         has_more = True
@@ -464,7 +568,7 @@ def run_aggregation():
                 break
                 
             batch = test_queue[i:i+batch_size]
-            print(f"[*] Проверка пачки из {len(batch)} новых кандидатов (TLS Handshake / TCP)...")
+            print(f"[*] Проверка пачки из {len(batch)} новых кандидатов (WebSocket Handshake / TLS)...")
             verified_batch = verify_configs_optimized(batch)
             
             for conf in verified_batch:
@@ -490,7 +594,6 @@ def run_aggregation():
         country_counters[country_code] += 1
         index = country_counters[country_code]
         
-        # Генерация красивого русского тега с флагом/глобусом
         new_name = get_rename_tag(country_code, index)
         
         if conf["protocol"] == "vmess":
@@ -500,24 +603,42 @@ def run_aggregation():
             
         renamed_lines.append(renamed_raw)
         
+    # --- ОФОРМЛЕНИЕ ПОДПИСКИ С КРАСИВЫМ ТРАФИКОМ ---
+    header_comments = [
+        "#profile-title: base64:TUZHTCBDb25uZWN0",  # MFHL Connect в Base64
+        "#profile-update-interval: 12",
+        # Показываем красивый счетчик: использовано 37.6 ГБ из 1.00 ТБ (Срок действия до конца 2029 года)
+        "#subscription-userinfo: upload=5368709120; download=32212254720; total=1073741824000; expire=1893014400"
+    ]
+    
+    # Визуальные заглушки-карточки, отображаемые прямо в списке серверов первыми
+    info_nodes = [
+        "vless://info@127.0.0.1:1080?security=none#%E2%84%B9%EF%B8%8F%20%D0%A1%D0%B1%D0%BE%D1%80%D0%BA%D0%B0%3A%20MFHL%20Connect",
+        "vless://traffic@127.0.0.1:1080?security=none#%F0%9F%93%8A%20%D0%A2%D1%80%D0%B0%D1%84%D0%B8%D0%BA%3A%201%20TB%20%28%D0%94%D0%BE%D1%81%D1%82%D1%83%D0%BF%D0%BD%D0%BE%29",
+        "vless://expire@127.0.0.1:1080?security=none#%F0%9F%93%85%20%D0%A1%D1%80%D0%BE%D0%BA%20%D0%B4%D0%B5%D0%B9%D1%81%D1%82%D0%B2%D0%B8%D1%8F%3A%20%D0%91%D0%B5%D0%B7%D0%BB%D0%B8%D0%BC%D0%B8%D1%82%D0%BD%D0%BE"
+    ]
+    
+    # Объединяем служебную информацию с рабочими серверами
+    all_output_lines = header_comments + info_nodes + renamed_lines
+    
     # Статистика
     stats = defaultdict(int)
     for f in final_selection:
         stats[f['country']] += 1
         
-    print("\n[+] Распределение стран в итоговой подписке (всего записей: {}):".format(len(final_selection)))
+    print("\n[+] Распределение стран в финальной подписке (всего записей: {}):".format(len(final_selection)))
     for country, count in stats.items():
         print(f"    - {country}: {count} шт.")
         
     # Сохранение результатов
     with open("subscription.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(renamed_lines))
-    print("\n[+] Файл 'subscription.txt' успешно перезаписан с новыми названиями.")
+        f.write("\n".join(all_output_lines))
+    print("\n[+] Файл 'subscription.txt' успешно перезаписан с красивым оформлением.")
     
-    base64_content = base64.b64encode("\n".join(renamed_lines).encode("utf-8")).decode("utf-8")
+    base64_content = base64.b64encode("\n".join(all_output_lines).encode("utf-8")).decode("utf-8")
     with open("subscription_base64.txt", "w", encoding="utf-8") as f:
         f.write(base64_content)
-    print("[+] Файл 'subscription_base64.txt' успешно перезаписан с новыми названиями.")
+    print("[+] Файл 'subscription_base64.txt' успешно перезаписан с красивым оформлением.")
 
 def scheduler_loop():
     interval = 1800
