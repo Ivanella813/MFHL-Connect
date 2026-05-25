@@ -630,15 +630,17 @@ def run_aggregation():
             
         renamed_lines.append(renamed_raw)
         
-    # --- ИСПРАВЛЕННОЕ ОФОРМЛЕНИЕ: СБРОС ТРАФИКА В 0 И КОРРЕКТНЫЙ BASE64 ТИТЛА ---
+    # --- ОФОРМЛЕНИЕ ПОДПИСКИ С КРАСИВЫМ ТРАФИКОМ И ОПИСАНИЕМ ---
     header_comments = [
-        "#profile-title: base64:TUZITCBDb25uZWN0",  # "MFHL Connect" (ИСПРАВЛЕНО с MFGL на MFHL)
+        "#profile-title: base64:TUZITCBDb25uZWN0",  # MFHL Connect в Base64
         "#profile-update-interval: 12",
-        # Сбросили трафик в 0! (upload=0, download=0) -> Показывает ровно 0 B / 1000 GB
-        "#subscription-userinfo: upload=0; download=0; total=1073741824000; expire=1893014400"
+        "#subscription-userinfo: upload=0; download=0; total=1073741824000; expire=1893014400",
+        "#support-url: https://t.me/LetoVPN_free",  # Кликабельная кнопка-самолетик (например, ведет в Лето VPN)
+        # Описание под шкалой трафика (строго по вашему запросу, без кринжа)
+        "#announce: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры",
+        "#description: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры"
     ]
     
-    # Полностью убрали визуальные loopback-заглушки (127.0.0.1) из списка серверов!
     all_output_lines = header_comments + renamed_lines
     
     stats = defaultdict(int)
@@ -673,6 +675,6 @@ def scheduler_loop():
 
 if __name__ == "__main__":
     try:
-        scheduler_loop()
+        run_aggregation() # Одноразовый запуск для GitHub Actions
     except KeyboardInterrupt:
         print("\n[*] Работа сборщика остановлена пользователем.")
