@@ -386,7 +386,6 @@ def get_country_code(ip, name):
     if geoip_calls_count >= MAX_GEOIP_CALLS:
         return "Unknown"
         
-    # Сначала пытаемся обратиться к быстрому и лояльному freeipapi.com
     try:
         url = f"https://freeipapi.com/api/json/{ip}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -400,7 +399,6 @@ def get_country_code(ip, name):
     except Exception:
         pass
         
-    # Если freeipapi выдал ошибку, пробуем классический ip-api.com
     try:
         url = f"http://ip-api.com/json/{ip}?fields=status,countryCode"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -410,7 +408,7 @@ def get_country_code(ip, name):
                 country = data.get("countryCode", "Unknown")
                 GEOIP_CACHE[ip] = country
                 geoip_calls_count += 1
-                time.sleep(1.2) # Необходимая пауза по правилам ip-api
+                time.sleep(1.2)
                 return country
     except Exception:
         pass
@@ -425,7 +423,7 @@ def test_port_from_russia(host, port, timeout=12):
     payload = {
         "type": "ping",
         "target": host,
-        "locations": [{"magic": "RU+eyeball"}], # Использование домашнего интернета в РФ
+        "locations": [{"magic": "RU+eyeball"}],
         "limit": 1,
         "measurementOptions": {
             "protocol": "TCP",
@@ -527,13 +525,24 @@ def rename_vmess_config(raw_url, new_name):
     return f"vmess://{encoded}"
 
 # =====================================================================
-# ОБНОВЛЕННАЯ ФУНКЦИЯ ДВУХЭТАПНОЙ ПРОВЕРКИ С ПЕРЕМЕШИВАНИЕМ КАНДИДАТОВ
+# ВОРКЕР ДЛЯ ПАРАЛЛЕЛЬНОГО ТЕСТИРОВАНИЯ ИЗ РФ
 # =====================================================================
-def verify_configs_optimized(raw_configs, max_workers=25):
+def check_ru_accessibility_worker(conf):
+    host = conf["host"]
+    port = conf["port"]
+    is_alive_in_ru = test_port_from_russia(host, port)
+    if is_alive_in_ru:
+        return conf
+    return None
+
+# =====================================================================
+# ПОЛНОСТЬЮ ОПТИМИЗИРОВАННАЯ ДВУХЭТАПНАЯ ПРОВЕРКА (СКОРОСТЬ x15)
+# =====================================================================
+def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=None):
     if not raw_configs:
         return []
     
-    # 1. Быстрая параллельная локальная проверка
+    # 1. Быстрая параллельная локальная проверка (из-за рубежа)
     alive_globally = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(check_tls_or_tcp_worker, r): r for r in raw_configs}
@@ -548,28 +557,54 @@ def verify_configs_optimized(raw_configs, max_workers=25):
     if not alive_globally:
         return []
         
-    # ПЕРЕМЕШИВАЕМ кандидатов перед отправкой в Globalping,
-    # чтобы при каждом запуске тестировались новые случайные конфиги.
     random.shuffle(alive_globally)
     
-    verified = []
-    candidates_to_check = alive_globally[:30] # Ограничение по лимитам Globalping
+    # Дедупликация хостов/портов в текущей пачке, чтобы не слать дубли в API
+    seen = set()
+    deduped_alive = []
+    for conf in alive_globally:
+        key = (conf["host"], conf["port"])
+        if key not in seen:
+            seen.add(key)
+            deduped_alive.append(conf)
+    alive_globally = deduped_alive
     
-    print(f"[*] Локально доступны: {len(alive_globally)} шт. Проверка из РФ через eyeball-зонды (провайдеры домашнего интернета)...")
-    for idx, conf in enumerate(candidates_to_check):
-        host = conf["host"]
-        port = conf["port"]
-        print(f"    [{idx+1}/{len(candidates_to_check)}] Тест {host}:{port}... ", end="", flush=True)
+    # Определение стран для "выживших" локально узлов и жесткий отсев
+    # тех, по которым лимит подписки (5 шт) уже полностью забит!
+    filtered_candidates = []
+    for conf in alive_globally:
+        country = get_country_code(conf["ip"], conf["name"])
+        conf["country"] = country
         
-        is_alive_in_ru = test_port_from_russia(host, port)
-        if is_alive_in_ru:
-            print("✅ РАБОТАЕТ В РФ")
-            country = get_country_code(conf["ip"], conf["name"])
-            conf["country"] = country
-            verified.append(conf)
-        else:
-            print("❌ ЗАБЛОКИРОВАН ТСПУ")
+        # Если эта страна в подписке уже заполнена (накоплено 5 штук), 
+        # пропускаем узел и даже не отправляем его на платный по времени тест в Globalping!
+        if selected_by_country and len(selected_by_country[country]) >= 5:
+            continue
             
+        filtered_candidates.append(conf)
+        
+    if not filtered_candidates:
+        return []
+        
+    # Будем проверять за раз не более 15 реально необходимых кандидатов
+    candidates_to_check = filtered_candidates[:15]
+    
+    print(f"[*] Локально доступны: {len(alive_globally)} шт. (после фильтрации забитых стран осталось: {len(filtered_candidates)} шт.)")
+    print(f"[*] Запуск параллельной проверки {len(candidates_to_check)} узлов из РФ через eyeball-зонды...")
+    
+    # 2. МНОГОПОТОЧНЫЙ запуск тестов Globalping (дает ускорение x10-x15)
+    verified = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(check_ru_accessibility_worker, conf): conf for conf in candidates_to_check}
+        for future in as_completed(futures):
+            try:
+                res = future.result()
+                if res:
+                    verified.append(res)
+                    print(f"    [+] Проверен из РФ: {res['host']}:{res['port']} ({res['country']}) -> РАБОТАЕТ")
+            except Exception:
+                pass
+                
     return verified
 
 def process_special_ru_source():
@@ -600,7 +635,7 @@ def process_special_ru_source():
     if len(ru_working_configs) < 5:
         needed = 5 - len(ru_working_configs)
         print(f"[!] В РФ физически находится только {len(ru_working_configs)} рабочих узлов.")
-        print(f"[*] Добираем еще {needed} рабочих узлов из этого же оптимизированного под РФ файла...")
+        print(f"[*] Добираем еще {needed} рабочих узлов из этого же файла...")
         for conf in fallback_working_configs[:needed]:
             ru_working_configs.append(conf)
             print(f"    [+] Добавлен резервный рабочий узел ({conf['country']}): {conf['protocol']}://{conf['host']}:{conf['port']}")
@@ -614,7 +649,7 @@ def run_aggregation():
     selected_by_country = defaultdict(list)
     selected_raws = set()
     
-    # 1. ЗАГРУЖАЕМ, ПЕРЕМЕШИВАЕМ И ПРОВЕРЯЕМ СТАРЫЕ КОНФИГУРАЦИИ
+    # 1. ЗАГРУЖАЕМ И ПРОВЕРЯЕМ СТАРЫЕ КОНФИГУРАЦИИ
     old_configs = []
     if os.path.exists("subscription.txt"):
         try:
@@ -628,9 +663,8 @@ def run_aggregation():
         unique_old = list(set(old_configs))
         print(f"[*] Найдено {len(unique_old)} сохраненных конфигураций из предыдущей подписки.")
         print("[*] Перемешивание и проверка старых конфигураций в первую очередь...")
-        # Перемешиваем старые, чтобы каждый запуск тестировать разные
         random.shuffle(unique_old)
-        alive_old = verify_configs_optimized(unique_old)
+        alive_old = verify_configs_optimized(unique_old, selected_by_country=selected_by_country)
         
         for conf in alive_old:
             country = conf["country"]
@@ -657,9 +691,7 @@ def run_aggregation():
             
         all_new_raws = list(set(new_raw_configs + special_ru_raws) - selected_raws)
         
-        # РЕШЕНИЕ ПРОБЛЕМЫ ОЧЕРЕДИ: Полностью объединяем всех новых кандидатов в один список
-        # и перемешиваем его случайным образом. Это ломает старый алгоритм, 
-        # уводивший безымянные конфиги в конец очереди.
+        # Полностью перемешиваем всех новых кандидатов в один случайный пул
         test_queue = list(all_new_raws)
         random.shuffle(test_queue)
         
@@ -667,13 +699,34 @@ def run_aggregation():
         print(f"[*] Для тестирования доступно {len(test_queue)} новых кандидатов (в случайном порядке).")
         print(f"[*] Начинаем порционный опрос пачками по {batch_size} до заполнения лимита...")
         
-        for i in range(0, len(test_queue), batch_size):
+        test_queue_index = 0
+        while test_queue_index < len(test_queue):
             if len(selected_raws) >= 50:
                 break
                 
-            batch = test_queue[i:i+batch_size]
+            # Собираем пачку из 15 кандидатов, предварительно отсекая те страны, 
+            # по которым лимит в 5 штук уже давно собран (не тратим время на парсинг и сокеты)
+            batch = []
+            while len(batch) < batch_size and test_queue_index < len(test_queue):
+                raw_conf = test_queue[test_queue_index]
+                test_queue_index += 1
+                
+                parsed = parse_config(raw_conf)
+                if not parsed:
+                    continue
+                
+                # Быстрая оценка страны по названию в ссылке
+                est_country = detect_country_from_name(parsed["name"])
+                if est_country and len(selected_by_country[est_country]) >= 5:
+                    continue
+                    
+                batch.append(raw_conf)
+                
+            if not batch:
+                break
+                
             print(f"[*] Проверка пачки из {len(batch)} новых кандидатов (WebSocket Handshake / TLS)...")
-            verified_batch = verify_configs_optimized(batch)
+            verified_batch = verify_configs_optimized(batch, selected_by_country=selected_by_country)
             
             for conf in verified_batch:
                 country = conf["country"]
