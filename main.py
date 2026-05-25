@@ -399,7 +399,6 @@ def get_country_code(ip, name):
 def get_rename_tag(country_code, index):
     global COUNTRY_INFO
     
-    # Резервная локальная копия словаря внутри функции на случай NameError
     local_info = {
         "RU": "Россия", "US": "США", "DE": "Германия", "NL": "Нидерланды",
         "FI": "Финляндия", "GB": "Великобритания", "FR": "Франция", "PL": "Польша",
@@ -410,7 +409,6 @@ def get_rename_tag(country_code, index):
         "KR": "Южная Корея"
     }
     
-    # Проверяем основной словарь
     try:
         info = COUNTRY_INFO.get(country_code)
     except NameError:
@@ -419,7 +417,6 @@ def get_rename_tag(country_code, index):
     if info:
         return f"{info['flag']} {info['ru_name']} #{index}"
     else:
-        # Пытаемся взять имя из резервной копии
         ru_name = local_info.get(country_code, country_code)
         if len(country_code) == 2 and country_code != "UN" and country_code != "Unknown":
             try:
@@ -633,20 +630,16 @@ def run_aggregation():
             
         renamed_lines.append(renamed_raw)
         
-    # --- ОФОРМЛЕНИЕ ПОДПИСКИ С КРАСИВЫМ ТРАФИКОМ ---
+    # --- ИСПРАВЛЕННОЕ ОФОРМЛЕНИЕ: СБРОС ТРАФИКА В 0 И КОРРЕКТНЫЙ BASE64 ТИТЛА ---
     header_comments = [
-        "#profile-title: base64:TUZHTCBDb25uZWN0",  # MFHL Connect в Base64
+        "#profile-title: base64:TUZITCBDb25uZWN0",  # "MFHL Connect" (ИСПРАВЛЕНО с MFGL на MFHL)
         "#profile-update-interval: 12",
-        "#subscription-userinfo: upload=5368709120; download=32212254720; total=1073741824000; expire=1893014400"
+        # Сбросили трафик в 0! (upload=0, download=0) -> Показывает ровно 0 B / 1000 GB
+        "#subscription-userinfo: upload=0; download=0; total=1073741824000; expire=1893014400"
     ]
     
-    info_nodes = [
-        "vless://info@127.0.0.1:1080?security=none#%E2%84%B9%EF%B8%8F%20%D0%A1%D0%B1%D0%BE%D1%80%D0%BA%D0%B0%3A%20MFHL%20Connect",
-        "vless://traffic@127.0.0.1:1080?security=none#%F0%9F%93%8A%20%D0%A2%D1%80%D0%B0%D1%84%D0%B8%D0%BA%3A%201%20TB%20%28%D0%94%D0%BE%D1%81%D1%82%D1%83%D0%BF%D0%BD%D0%BE%29",
-        "vless://expire@127.0.0.1:1080?security=none#%F0%9F%93%85%20%D0%A1%D1%80%D0%BE%D0%BA%20%D0%B4%D0%B5%D0%B9%D1%81%D1%82%D0%B2%D0%B8%D1%8F%3A%20%D0%91%D0%B5%D0%B7%D0%BB%D0%B8%D0%BC%D0%B8%D1%82%D0%BD%D0%BE"
-    ]
-    
-    all_output_lines = header_comments + info_nodes + renamed_lines
+    # Полностью убрали визуальные loopback-заглушки (127.0.0.1) из списка серверов!
+    all_output_lines = header_comments + renamed_lines
     
     stats = defaultdict(int)
     for f in final_selection:
