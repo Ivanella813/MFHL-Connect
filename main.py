@@ -12,6 +12,37 @@ from collections import defaultdict
 from urllib.parse import urlparse, unquote, quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# =====================================================================
+# СЛОВАРЬ СТРАН (Определен на самом верху для предотвращения NameError)
+# =====================================================================
+COUNTRY_INFO = {
+    "RU": {"flag": "🇷🇺", "ru_name": "Россия"},
+    "US": {"flag": "🇺🇸", "ru_name": "США"},
+    "DE": {"flag": "🇩🇪", "ru_name": "Германия"},
+    "NL": {"flag": "🇳🇱", "ru_name": "Нидерланды"},
+    "FI": {"flag": "🇫🇮", "ru_name": "Финляндия"},
+    "GB": {"flag": "🇬🇧", "ru_name": "Великобритания"},
+    "FR": {"flag": "🇫🇷", "ru_name": "Франция"},
+    "PL": {"flag": "🇵🇱", "ru_name": "Польша"},
+    "KZ": {"flag": "🇰🇿", "ru_name": "Казахстан"},
+    "TR": {"flag": "🇹🇷", "ru_name": "Турция"},
+    "SG": {"flag": "🇸🇬", "ru_name": "Сингапур"},
+    "JP": {"flag": "🇯🇵", "ru_name": "Япония"},
+    "EE": {"flag": "🇪🇪", "ru_name": "Эстония"},
+    "SE": {"flag": "🇸🇪", "ru_name": "Швеция"},
+    "CA": {"flag": "🇨🇦", "ru_name": "Канада"},
+    "BY": {"flag": "🇧🇾", "ru_name": "Беларусь"},
+    "HK": {"flag": "🇭🇰", "ru_name": "Гонконг"},
+    "CH": {"flag": "🇨🇭", "ru_name": "Швейцария"},
+    "AT": {"flag": "🇦🇹", "ru_name": "Австрия"},
+    "ES": {"flag": "🇪🇸", "ru_name": "Испания"},
+    "IT": {"flag": "🇮🇹", "ru_name": "Италия"},
+    "UA": {"flag": "🇺🇦", "ru_name": "Украина"},
+    "RO": {"flag": "🇷🇴", "ru_name": "Румыния"},
+    "BG": {"flag": "🇧🇬", "ru_name": "Болгария"},
+    "KR": {"flag": "🇰🇷", "ru_name": "Южная Корея"},
+}
+
 # Название локального файла для копирования конфигов из чатов/групп
 LOCAL_FILE = "local_configs.txt"
 
@@ -23,14 +54,13 @@ TELEGRAM_CHANNELS = [
     "LetoVPN_free"
 ]
 
-# ВОЗВРАЩЕНЫ ИСХОДНЫЕ ИСТОЧНИКИ (как вы и просили)
+# Общие источники (проверенные)
 RAW_URLS = [
     "https://raw.githubusercontent.com/adop1344-bot/LetoVPN_free/refs/heads/main/ru.txt",
     "https://raw.githubusercontent.com/F0rc3Run/F0rc3Run/refs/heads/main/Best-Results/proxies.txt",
     "https://raw.githubusercontent.com/Epodonios/v2ray-configs/refs/heads/main/Sub1.txt"
 ]
 
-# Корректное регулярное выражение для поиска полных ссылок
 CONFIG_REGEX = re.compile(r'(?:vless|vmess|ss|trojan|hysteria2|tuic)://[^\s"<]+')
 
 GEOIP_CACHE = {}
@@ -38,7 +68,6 @@ geoip_calls_count = 0
 MAX_GEOIP_CALLS = 40
 
 def decode_if_base64(text):
-    """Декодирует текст, если он зашифрован в Base64."""
     clean_text = text.strip()
     if re.match(r'^[A-Za-z0-9+/=\s\n\r]+$', clean_text) and not clean_text.startswith("vless://") and not clean_text.startswith("vmess://") and len(clean_text) > 40:
         try:
@@ -76,7 +105,7 @@ def fetch_raw_url(url):
     try:
         with urllib.request.urlopen(req, timeout=10) as response:
             content = response.read().decode('utf-8', errors='ignore')
-            content = decode_if_base64(content)  # Распознаем шифрование Base64 подписок
+            content = decode_if_base64(content)
             configs = CONFIG_REGEX.findall(content)
             print(f"[+] Из источника {url[:60]}... извлечено {len(configs)} конфигураций.")
             return configs
@@ -110,7 +139,6 @@ def decode_base64_vmess(vmess_str):
 
 def parse_config(config_str):
     try:
-        # Игнорируем визуальные заглушки-карточки при повторном анализе
         if "127.0.0.1" in config_str or "localhost" in config_str:
             return None
             
@@ -165,7 +193,6 @@ def parse_config(config_str):
                         is_tls = True
                     sni = params.get("sni")
                     
-                    # WebSocket параметры
                     transport_type = params.get("type", "").lower()
                     if transport_type == "ws":
                         is_ws = True
@@ -253,10 +280,6 @@ def pre_filter_raw_configs(raw_strings, max_per_country_pre=10):
     return list(set(pre_selected))
 
 def test_websocket_node(ip, port, is_tls, host, path, host_header=None, timeout=2.5):
-    """
-    «По уму»: Выполняет реальное HTTP-рукопожатие для WebSocket-узлов.
-    Отсекает мертвые бэкенды за «живым» прокси Cloudflare.
-    """
     if not host_header:
         host_header = host
     if not path:
@@ -287,9 +310,6 @@ def test_websocket_node(ip, port, is_tls, host, path, host_header=None, timeout=
                 sock.sendall(req.encode('utf-8'))
                 res = sock.recv(1024).decode('utf-8', errors='ignore')
                 
-        # Если бэкенд жив, он вернет 101 Switching Protocols.
-        # В случае ошибки авторизации Xray может вернуть 400 Bad Request (но это означает, что бэкенд ОТВЕТИЛ).
-        # Ошибки 502, 503, 403, 404 — бэкенд мертв.
         if "HTTP/1.1 101" in res:
             return True
         if "HTTP/1.1 400" in res and "cloudflare" not in res.lower():
@@ -306,7 +326,6 @@ def test_node_connection(host, port, protocol, is_tls=False, sni=None, is_ws=Fal
         return None
         
     if is_ws:
-        # Для WebSocket-протоколов выполняем углубленную проверку рукопожатия
         success = test_websocket_node(ip, port, is_tls, host, path, host_header, timeout)
         return ip if success else None
         
@@ -378,14 +397,34 @@ def get_country_code(ip, name):
     return "Unknown"
 
 def get_rename_tag(country_code, index):
-    info = COUNTRY_INFO.get(country_code)
+    global COUNTRY_INFO
+    
+    # Резервная локальная копия словаря внутри функции на случай NameError
+    local_info = {
+        "RU": "Россия", "US": "США", "DE": "Германия", "NL": "Нидерланды",
+        "FI": "Финляндия", "GB": "Великобритания", "FR": "Франция", "PL": "Польша",
+        "KZ": "Казахстан", "TR": "Турция", "SG": "Сингапур", "JP": "Япония",
+        "EE": "Эстония", "SE": "Швеция", "CA": "Канада", "BY": "Беларусь",
+        "HK": "Гонконг", "CH": "Швейцария", "AT": "Австрия", "ES": "Испания",
+        "IT": "Италия", "UA": "Украина", "RO": "Румыния", "BG": "Болгария",
+        "KR": "Южная Корея"
+    }
+    
+    # Проверяем основной словарь
+    try:
+        info = COUNTRY_INFO.get(country_code)
+    except NameError:
+        info = None
+        
     if info:
         return f"{info['flag']} {info['ru_name']} #{index}"
     else:
+        # Пытаемся взять имя из резервной копии
+        ru_name = local_info.get(country_code, country_code)
         if len(country_code) == 2 and country_code != "UN" and country_code != "Unknown":
             try:
                 flag = "".join(chr(127397 + ord(c)) for c in country_code)
-                return f"{flag} {country_code} #{index}"
+                return f"{flag} {ru_name} #{index}"
             except Exception:
                 pass
         return f"🌐 Unknown #{index}"
@@ -507,27 +546,21 @@ def run_aggregation():
     total_selected = len(selected_raws)
     print(f"[*] После проверки старой подписки сохранено рабочих узлов: {total_selected}/50.")
     
-    # 2. ЕСЛИ УЗЛОВ МЕНЬШЕ 50 — ДОБИРАЕМ ИЗ НОВЫХ ИСТОЧНИКОВ (ЛЕНИВОЕ ТЕСТИРОВАНИЕ)
+    # 2. ЕСЛИ УЗЛОВ МЕНЬШЕ 50 — ДОБИРАЕМ ИЗ НОВЫХ ИСТОЧНИКОВ
     if total_selected < 50:
         print("[*] Начинаем сбор новых конфигураций для добора...")
         new_raw_configs = []
         
-        # Считываем локальные файлы
         new_raw_configs.extend(fetch_local_file())
-        
-        # Спец. источник от igareck
         special_ru_raws = fetch_raw_url(SPECIAL_RU_SOURCE)
         
-        # Общие источники
         for channel in TELEGRAM_CHANNELS:
             new_raw_configs.extend(fetch_telegram_channel(channel))
         for url in RAW_URLS:
             new_raw_configs.extend(fetch_raw_url(url))
             
-        # Убираем дубликаты и то, что уже добавлено из старого списка
         all_new_raws = list(set(new_raw_configs + special_ru_raws) - selected_raws)
         
-        # Группируем сырые по предполагаемым странам
         raw_by_est_country = defaultdict(list)
         raw_unknown = []
         for r in all_new_raws:
@@ -540,12 +573,10 @@ def run_aggregation():
             else:
                 raw_unknown.append(r)
                 
-        # Перемешиваем каждую страну для максимальной вариативности
         for country in raw_by_est_country:
             random.shuffle(raw_by_est_country[country])
         random.shuffle(raw_unknown)
         
-        # Чередуем их в общую очередь (Round-Robin)
         test_queue = []
         index = 0
         has_more = True
@@ -558,7 +589,6 @@ def run_aggregation():
             index += 1
         test_queue.extend(raw_unknown)
         
-        # Тестируем новыми пачками по 15 штук, пока не наберем ровно 50
         batch_size = 15
         print(f"[*] Для тестирования доступно {len(test_queue)} новых кандидатов.")
         print(f"[*] Начинаем порционный опрос пачками по {batch_size} до заполнения лимита...")
@@ -607,21 +637,17 @@ def run_aggregation():
     header_comments = [
         "#profile-title: base64:TUZHTCBDb25uZWN0",  # MFHL Connect в Base64
         "#profile-update-interval: 12",
-        # Показываем красивый счетчик: использовано 37.6 ГБ из 1.00 ТБ (Срок действия до конца 2029 года)
         "#subscription-userinfo: upload=5368709120; download=32212254720; total=1073741824000; expire=1893014400"
     ]
     
-    # Визуальные заглушки-карточки, отображаемые прямо в списке серверов первыми
     info_nodes = [
         "vless://info@127.0.0.1:1080?security=none#%E2%84%B9%EF%B8%8F%20%D0%A1%D0%B1%D0%BE%D1%80%D0%BA%D0%B0%3A%20MFHL%20Connect",
         "vless://traffic@127.0.0.1:1080?security=none#%F0%9F%93%8A%20%D0%A2%D1%80%D0%B0%D1%84%D0%B8%D0%BA%3A%201%20TB%20%28%D0%94%D0%BE%D1%81%D1%82%D1%83%D0%BF%D0%BD%D0%BE%29",
         "vless://expire@127.0.0.1:1080?security=none#%F0%9F%93%85%20%D0%A1%D1%80%D0%BE%D0%BA%20%D0%B4%D0%B5%D0%B9%D1%81%D1%82%D0%B2%D0%B8%D1%8F%3A%20%D0%91%D0%B5%D0%B7%D0%BB%D0%B8%D0%BC%D0%B8%D1%82%D0%BD%D0%BE"
     ]
     
-    # Объединяем служебную информацию с рабочими серверами
     all_output_lines = header_comments + info_nodes + renamed_lines
     
-    # Статистика
     stats = defaultdict(int)
     for f in final_selection:
         stats[f['country']] += 1
@@ -630,7 +656,6 @@ def run_aggregation():
     for country, count in stats.items():
         print(f"    - {country}: {count} шт.")
         
-    # Сохранение результатов
     with open("subscription.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(all_output_lines))
     print("\n[+] Файл 'subscription.txt' успешно перезаписан с красивым оформлением.")
