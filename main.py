@@ -466,18 +466,18 @@ def get_country_code(ip, name):
     return "Unknown"
 
 # =====================================================================
-# ПРОВЕРКА ЧЕРЕЗ RU+EYEBALL ЗОНДЫ (ДОМАШНИЙ ИНТЕРНЕТ РФ)
+# УСИЛЕННАЯ ПРОВЕРКА ЧЕРЕЗ RU+EYEBALL ЗОНДЫ (3 ЗОНДА ДЛЯ КОНСЕНСУСА)
 # =====================================================================
 def test_port_from_russia(host, port, timeout=12, is_tls=True):
     url = "https://api.globalping.io/v1/measurements"
     
-    # ИСПРАВЛЕНО: параметры "method" и "path" теперь вложены в "request"
+    # Для строгости запрашиваем проверку сразу у 3 разных зондов в РФ
     if is_tls:
         payload = {
             "type": "http",
             "target": host,
             "locations": [{"magic": "RU+eyeball"}],
-            "limit": 1,
+            "limit": 3,
             "measurementOptions": {
                 "port": int(port),
                 "protocol": "HTTPS",
@@ -492,7 +492,7 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True):
             "type": "ping",
             "target": host,
             "locations": [{"magic": "RU+eyeball"}],
-            "limit": 1,
+            "limit": 3,
             "measurementOptions": {
                 "protocol": "TCP",
                 "port": int(port),
@@ -530,16 +530,22 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True):
                         if not results:
                             return False
                         
-                        probe_result = results[0].get("result", {})
-                        
-                        if is_tls:
-                            return probe_result.get("status") != "failed"
-                        else:
-                            if probe_result.get("status") == "failed":
-                                return False
-                            stats = probe_result.get("stats", {})
-                            loss = stats.get("loss", 100)
-                            return loss < 100
+                        success_count = 0
+                        for r_item in results:
+                            probe_result = r_item.get("result", {})
+                            if is_tls:
+                                if probe_result.get("status") != "failed":
+                                    success_count += 1
+                            else:
+                                if probe_result.get("status") != "failed":
+                                    stats = probe_result.get("stats", {})
+                                    loss = stats.get("loss", 100)
+                                    if loss < 100:
+                                        success_count += 1
+                                        
+                        # СТРОГИЙ КОНСЕНСУС: все ответившие зонды в РФ должны подтвердить работу.
+                        # Если хотя бы один зонд зафиксировал блокировку, узел отбраковывается.
+                        return success_count == len(results) and success_count > 0
                             
                     elif status == "failed":
                         return False
@@ -718,6 +724,11 @@ def run_aggregation():
         
         for conf in alive_old:
             country = conf["country"]
+            
+            # ФИЛЬТР: Исключаем серверы из России, так как они не могут обойти блокировки ТСПУ
+            if country == "RU":
+                continue
+                
             if len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                 selected_by_country[country].append(conf)
                 selected_raws.add(conf["raw"])
@@ -762,7 +773,7 @@ def run_aggregation():
                     continue
                 
                 est_country = detect_country_from_name(parsed["name"])
-                if est_country and len(selected_by_country[est_country]) >= 5:
+                if est_country and (est_country == "RU" or len(selected_by_country[est_country]) >= 5):
                     continue
                     
                 batch.append(raw_conf)
@@ -775,6 +786,11 @@ def run_aggregation():
             
             for conf in verified_batch:
                 country = conf["country"]
+                
+                # ФИЛЬТР: Исключаем серверы из России
+                if country == "RU":
+                    continue
+                    
                 if len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                     selected_by_country[country].append(conf)
                     selected_raws.add(conf["raw"])
