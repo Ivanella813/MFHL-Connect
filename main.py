@@ -85,6 +85,12 @@ MAX_GEOIP_CALLS = 40
 # Переменная токена для Globalping
 GLOBALPING_TOKEN = os.getenv("GLOBALPING_TOKEN", "ozuwucpiutcobvnboqlrpxt6nggf2jqv")
 
+# Ограничители лимитов Globalping
+RATE_LIMITED = False
+globalping_tests_count = 0
+# 210 тестов за сессию = максимум 70 проверенных кандидатов каждые 30 минут
+MAX_GLOBALPING_TESTS_PER_RUN = 210  
+
 def decode_if_base64(text):
     clean_text = text.strip()
     normalized_text = re.sub(r'\s+', '', clean_text)
@@ -469,11 +475,21 @@ def get_country_code(ip, name):
 # СТРОГАЯ СИМУЛЯЦИЯ TLS HANDSHAKE С УЧЕТОМ ОРИГИНАЛЬНОГО SNI
 # =====================================================================
 def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_header=None):
-    url = "https://api.globalping.io/v1/measurements"
+    global RATE_LIMITED, globalping_tests_count
     
-    # ПРИНУДИТЕЛЬНО передаем в Host-заголовок оригинальный SNI из параметров конфига.
-    # Это заставит ТСПУ проанализировать TLS Client Hello с реальным SNI (например, microsoft.com).
-    # Если этот SNI заблокирован на уровне провайдеров РФ, тест гарантированно выдаст ошибку!
+    # Если предохранитель сработал, не шлем запросы, чтобы поберечь API
+    if RATE_LIMITED:
+        return False
+        
+    # Защитный лимит на сессию
+    if globalping_tests_count >= MAX_GLOBALPING_TESTS_PER_RUN:
+        RATE_LIMITED = True
+        print(" [!] Достигнут лимит тестов на одну сессию (safety limit). Пропускаем оставшиеся тесты.")
+        return False
+
+    url = "https://api.globalping.io/v1/measurements"
+    limit_probes = 3
+    
     req_host = sni if sni else (host_header if host_header else host)
     
     if is_tls:
@@ -481,14 +497,14 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
             "type": "http",
             "target": host,
             "locations": [{"magic": "RU+eyeball"}],
-            "limit": 3,
+            "limit": limit_probes,
             "measurementOptions": {
                 "port": int(port),
                 "protocol": "HTTPS",
                 "request": {
                     "method": "GET",
                     "path": "/",
-                    "host": req_host  # Передаем оригинальный SNI/Host для детекции ТСПУ
+                    "host": req_host
                 }
             }
         }
@@ -497,7 +513,7 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
             "type": "ping",
             "target": host,
             "locations": [{"magic": "RU+eyeball"}],
-            "limit": 3,
+            "limit": limit_probes,
             "measurementOptions": {
                 "protocol": "TCP",
                 "port": int(port),
@@ -513,6 +529,9 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
         headers["Authorization"] = f"Bearer {GLOBALPING_TOKEN}"
     
     try:
+        # Плюсуем тесты к счетчику сессии
+        globalping_tests_count += limit_probes
+        
         req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=5) as r:
             res = json.loads(r.read().decode('utf-8'))
@@ -548,16 +567,27 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
                                     if loss < 100:
                                         success_count += 1
                                         
-                        # СТРОГИЙ КОНСЕНСУС: все ответившие зонды в РФ должны подтвердить работу.
                         return success_count == len(results) and success_count > 0
                             
                     elif status == "failed":
                         return False
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    print(" [!] Превышен лимит запросов при опросе статуса (HTTP 429).")
+                    RATE_LIMITED = True
+                    return False
             except Exception:
                 pass
         return False
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            print(" [!] API Globalping вернул HTTP 429 (Too Many Requests). Прекращаем запросы в этой сессии.")
+            RATE_LIMITED = True
+        else:
+            print(f" [!] Ошибка связи с API Globalping ({e}). Возвращаем False.")
+        return False
     except Exception as e:
-        print(f" [!] Ошибка связи с API Globalping ({e}). Возвращаем False (узел помечен временно недоступным).")
+        print(f" [!] Ошибка связи с API Globalping ({e}). Возвращаем False.")
         return False
 
 def get_rename_tag(country_code, index):
@@ -601,7 +631,6 @@ def check_ru_accessibility_worker(conf):
     sni = conf.get("sni")
     host_header = conf.get("host_header")
     
-    # Передаем оригинальные SNI и host_header для полноценной проверки под ТСПУ
     is_alive_in_ru = test_port_from_russia(host, port, is_tls=is_tls, sni=sni, host_header=host_header)
     if is_alive_in_ru:
         return conf
@@ -707,8 +736,10 @@ def process_special_ru_source():
     return ru_working_configs[:5]
 
 def run_aggregation():
-    global geoip_calls_count
+    global geoip_calls_count, RATE_LIMITED, globalping_tests_count
     geoip_calls_count = 0
+    RATE_LIMITED = False
+    globalping_tests_count = 0
     
     selected_by_country = defaultdict(list)
     selected_raws = set()
@@ -742,7 +773,7 @@ def run_aggregation():
     print(f"[*] После проверки старой подписки сохранено рабочих узлов: {total_selected}/50.")
     
     # 2. ЕСЛИ УЗЛОВ МЕНЬШЕ 50 — ДОБИРАЕМ ИЗ НОВЫХ ИСТОЧНИКОВ
-    if total_selected < 50:
+    if total_selected < 50 and not RATE_LIMITED:
         print("[*] Начинаем сбор новых конфигураций для добора...")
         new_raw_configs = []
         
@@ -764,7 +795,7 @@ def run_aggregation():
         
         test_queue_index = 0
         while test_queue_index < len(test_queue):
-            if len(selected_raws) >= 50:
+            if len(selected_raws) >= 50 or RATE_LIMITED:
                 break
                 
             batch = []
