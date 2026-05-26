@@ -466,12 +466,16 @@ def get_country_code(ip, name):
     return "Unknown"
 
 # =====================================================================
-# УСИЛЕННАЯ ПРОВЕРКА ЧЕРЕЗ RU+EYEBALL ЗОНДЫ (3 ЗОНДА ДЛЯ КОНСЕНСУСА)
+# СТРОГАЯ СИМУЛЯЦИЯ TLS HANDSHAKE С УЧЕТОМ ОРИГИНАЛЬНОГО SNI
 # =====================================================================
-def test_port_from_russia(host, port, timeout=12, is_tls=True):
+def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_header=None):
     url = "https://api.globalping.io/v1/measurements"
     
-    # Для строгости запрашиваем проверку сразу у 3 разных зондов в РФ
+    # ПРИНУДИТЕЛЬНО передаем в Host-заголовок оригинальный SNI из параметров конфига.
+    # Это заставит ТСПУ проанализировать TLS Client Hello с реальным SNI (например, microsoft.com).
+    # Если этот SNI заблокирован на уровне провайдеров РФ, тест гарантированно выдаст ошибку!
+    req_host = sni if sni else (host_header if host_header else host)
+    
     if is_tls:
         payload = {
             "type": "http",
@@ -483,7 +487,8 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True):
                 "protocol": "HTTPS",
                 "request": {
                     "method": "GET",
-                    "path": "/"
+                    "path": "/",
+                    "host": req_host  # Передаем оригинальный SNI/Host для детекции ТСПУ
                 }
             }
         }
@@ -544,7 +549,6 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True):
                                         success_count += 1
                                         
                         # СТРОГИЙ КОНСЕНСУС: все ответившие зонды в РФ должны подтвердить работу.
-                        # Если хотя бы один зонд зафиксировал блокировку, узел отбраковывается.
                         return success_count == len(results) and success_count > 0
                             
                     elif status == "failed":
@@ -594,7 +598,11 @@ def check_ru_accessibility_worker(conf):
     host = conf["host"]
     port = conf["port"]
     is_tls = conf.get("is_tls", False)
-    is_alive_in_ru = test_port_from_russia(host, port, is_tls=is_tls)
+    sni = conf.get("sni")
+    host_header = conf.get("host_header")
+    
+    # Передаем оригинальные SNI и host_header для полноценной проверки под ТСПУ
+    is_alive_in_ru = test_port_from_russia(host, port, is_tls=is_tls, sni=sni, host_header=host_header)
     if is_alive_in_ru:
         return conf
     return None
