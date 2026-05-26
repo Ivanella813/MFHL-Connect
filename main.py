@@ -725,10 +725,6 @@ def run_aggregation():
         for conf in alive_old:
             country = conf["country"]
             
-            # ФИЛЬТР: Исключаем серверы из России, так как они не могут обойти блокировки ТСПУ
-            if country == "RU":
-                continue
-                
             if len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                 selected_by_country[country].append(conf)
                 selected_raws.add(conf["raw"])
@@ -773,7 +769,7 @@ def run_aggregation():
                     continue
                 
                 est_country = detect_country_from_name(parsed["name"])
-                if est_country and (est_country == "RU" or len(selected_by_country[est_country]) >= 5):
+                if est_country and len(selected_by_country[est_country]) >= 5:
                     continue
                     
                 batch.append(raw_conf)
@@ -787,10 +783,6 @@ def run_aggregation():
             for conf in verified_batch:
                 country = conf["country"]
                 
-                # ФИЛЬТР: Исключаем серверы из России
-                if country == "RU":
-                    continue
-                    
                 if len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                     selected_by_country[country].append(conf)
                     selected_raws.add(conf["raw"])
