@@ -15,7 +15,15 @@ from urllib.parse import urlparse, unquote, quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =====================================================================
-# СЛОВАРЬ СТРАН (Поддерживает Латвию, Израиль, Венгрию и др.)
+# НАСТРОЙКА ЛОКАЛЬНОГО ЗАПУСКА
+# =====================================================================
+# Установите True, если этот скрипт запускается на вашем домашнем ПК в РФ 
+# (через Self-Hosted Runner или локально). Скрипт отключит внешние API 
+# и проверит все узлы напрямую через ваш домашний интернет-канал!
+RUN_ON_LOCAL_RU_PC = True 
+
+# =====================================================================
+# СЛОВАРЬ СТРАН
 # =====================================================================
 COUNTRY_INFO = {
     "RU": {"flag": "🇷🇺", "ru_name": "Россия"},
@@ -66,10 +74,8 @@ COUNTRY_INFO = {
     "LT": {"flag": "🇱🇹", "ru_name": "Литва"},
 }
 
-# Название локального файла для копирования конфигов из чатов/групп
 LOCAL_FILE = "local_configs.txt"
 
-# Общие источники (проверенные)
 RAW_URLS = [
     "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt",
     "https://mifa.world/other",
@@ -82,13 +88,8 @@ GEOIP_CACHE = {}
 geoip_calls_count = 0
 MAX_GEOIP_CALLS = 40
 
-# Переменная токена для Globalping
 GLOBALPING_TOKEN = os.getenv("GLOBALPING_TOKEN", "ozuwucpiutcobvnboqlrpxt6nggf2jqv")
-
-# Глобальный лок для Check-Host
 CHECK_HOST_LOCK = threading.Lock()
-
-# Ограничители лимитов Globalping
 RATE_LIMITED = False
 globalping_tests_count = 0
 MAX_GLOBALPING_TESTS_PER_RUN = 210  
@@ -96,8 +97,7 @@ MAX_GLOBALPING_TESTS_PER_RUN = 210
 def decode_if_base64(text):
     clean_text = text.strip()
     normalized_text = re.sub(r'\s+', '', clean_text)
-    
-    if re.match(r'^[A-Za-z0-9+/=\-_]+$', normalized_text) and not normalized_text.startswith("vless://") and not normalized_text.startswith("vmess://") and len(normalized_text) > 40:
+    if re.match(r'^[A-Za-0-9+/=\-_]+$', normalized_text) and not normalized_text.startswith("vless://") and not normalized_text.startswith("vmess://") and len(normalized_text) > 40:
         try:
             normalized_text = normalized_text.replace('-', '+').replace('_', '/')
             normalized_text += "=" * ((4 - len(normalized_text) % 4) % 4)
@@ -113,11 +113,9 @@ def fetch_local_file():
         try:
             with open(LOCAL_FILE, "w", encoding="utf-8") as f:
                 f.write("# Вставьте сюда скопированный текст из групп или готовую base64 подписку\n")
-                f.write("# Скрипт автоматически декодирует данные и извлечет из них ссылки при запуске!\n")
         except Exception:
             pass
         return []
-        
     try:
         with open(LOCAL_FILE, "r", encoding="utf-8") as f:
             content = f.read()
@@ -157,7 +155,6 @@ def parse_config(config_str):
     try:
         if "127.0.0.1" in config_str or "localhost" in config_str:
             return None
-            
         if config_str.startswith("vmess://"):
             data = decode_base64_vmess(config_str)
             if data:
@@ -187,22 +184,18 @@ def parse_config(config_str):
                 credentials, host_port = netloc.rsplit("@", 1)
             else:
                 host_port = netloc
-            
             if ":" in host_port:
                 host, port_str = host_port.rsplit(":", 1)
                 port = int(port_str)
             else:
                 host = host_port
                 port = 443
-                
             name = unquote(parsed.fragment) if parsed.fragment else ""
-            
             is_tls = False
             sni = None
             is_ws = False
             path = "/"
             host_header = None
-            
             if parsed.query:
                 try:
                     params = dict(x.split("=", 1) for x in parsed.query.split("&") if "=" in x)
@@ -210,7 +203,6 @@ def parse_config(config_str):
                     if security in ["tls", "reality"]:
                         is_tls = True
                     sni = params.get("sni")
-                    
                     transport_type = params.get("type", "").lower()
                     if transport_type == "ws":
                         is_ws = True
@@ -218,10 +210,8 @@ def parse_config(config_str):
                     host_header = params.get("host")
                 except Exception:
                     pass
-            
             if protocol in ["trojan", "hysteria2", "tuic"]:
                 is_tls = True
-                
             return {
                 "protocol": protocol,
                 "host": host,
@@ -247,10 +237,8 @@ def get_backend_fingerprint(parsed):
     sni = parsed.get("sni")
     path = parsed.get("path", "/")
     is_ws = parsed.get("is_ws", False)
-    
     raw_lower = parsed.get("raw", "").lower()
     is_cdn = is_ws or "grpc" in raw_lower or "httpupgrade" in raw_lower
-    
     if is_cdn and sni:
         return (protocol, credentials, sni.lower(), path)
     else:
@@ -273,7 +261,6 @@ def detect_country_from_name(name):
     if not name:
         return None
     name_upper = name.upper()
-    
     country_flags = {
         "🇷🇺": "RU", "🇺🇸": "US", "🇩🇪": "DE", "🇳🇱": "NL", "🇫🇮": "FI", 
         "🇬🇧": "GB", "🇫🇷": "FR", "🇵🇱": "PL", "🇰🇿": "KZ", "🇧🇾": "BY", 
@@ -287,7 +274,6 @@ def detect_country_from_name(name):
     for flag, code in country_flags.items():
         if flag in name:
             return code
-            
     patterns = {
         "RU": r"\b(RU|RUS|RUSSIA|РОССИЯ|РФ)\b",
         "US": r"\b(US|USA|UNITED STATES)\b",
@@ -310,32 +296,10 @@ def detect_country_from_name(name):
         "CZ": r"\b(CZ|CZE|CZECH|ЧЕХИЯ|ПРАГА)\b",
         "IN": r"\b(IN|IND|INDIA|ИНДИЯ)\b",
     }
-    
     for country, pattern in patterns.items():
         if re.search(pattern, name_upper):
             return country
     return None
-
-def pre_filter_raw_configs(raw_strings, max_per_country_pre=10):
-    by_est_country = defaultdict(list)
-    unknown_list = []
-    
-    for raw in raw_strings:
-        parsed = parse_config(raw)
-        if not parsed:
-            continue
-        est_country = detect_country_from_name(parsed["name"])
-        if est_country:
-            by_est_country[est_country].append(raw)
-        else:
-            unknown_list.append(raw)
-            
-    pre_selected = []
-    for country, items in by_est_country.items():
-        pre_selected.extend(items[:max_per_country_pre])
-        
-    pre_selected.extend(unknown_list[:40])
-    return list(set(pre_selected))
 
 def test_websocket_node(ip, port, is_tls, host, path, host_header=None, timeout=2.5):
     if not host_header:
@@ -344,7 +308,6 @@ def test_websocket_node(ip, port, is_tls, host, path, host_header=None, timeout=
         path = "/"
     if not path.startswith("/"):
         path = "/" + path
-        
     req = (
         f"GET {path} HTTP/1.1\r\n"
         f"Host: {host_header}\r\n"
@@ -353,7 +316,6 @@ def test_websocket_node(ip, port, is_tls, host, path, host_header=None, timeout=
         f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
         f"Sec-WebSocket-Version: 13\r\n\r\n"
     )
-    
     try:
         if is_tls:
             context = ssl.create_default_context()
@@ -367,12 +329,10 @@ def test_websocket_node(ip, port, is_tls, host, path, host_header=None, timeout=
             with socket.create_connection((ip, port), timeout=timeout) as sock:
                 sock.sendall(req.encode('utf-8'))
                 res = sock.recv(1024).decode('utf-8', errors='ignore')
-                
         if "HTTP/1.1 101" in res:
             return True
         if "HTTP/1.1 400" in res and "cloudflare" not in res.lower():
             return True
-            
         return False
     except Exception:
         return False
@@ -382,17 +342,14 @@ def test_node_connection(host, port, protocol, is_tls=False, sni=None, is_ws=Fal
         ip = socket.gethostbyname(host)
     except socket.gaierror:
         return None
-        
     if is_ws:
         success = test_websocket_node(ip, port, is_tls, host, path, host_header, timeout)
         return ip if success else None
-        
     if is_tls:
         try:
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
-            
             with socket.create_connection((ip, port), timeout=timeout) as sock:
                 with context.wrap_socket(sock, server_hostname=sni if sni else host) as ssl_sock:
                     return ip
@@ -427,17 +384,13 @@ def check_tls_or_tcp_worker(raw_conf):
 
 def get_country_code(ip, name):
     global geoip_calls_count
-    
     detected = detect_country_from_name(name)
     if detected:
         return detected
-        
     if ip in GEOIP_CACHE:
         return GEOIP_CACHE[ip]
-        
     if geoip_calls_count >= MAX_GEOIP_CALLS:
         return "Unknown"
-        
     try:
         url = f"https://freeipapi.com/api/json/{ip}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -450,7 +403,6 @@ def get_country_code(ip, name):
                 return country
     except Exception:
         pass
-        
     try:
         url = f"http://ip-api.com/json/{ip}?fields=status,countryCode"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -464,37 +416,21 @@ def get_country_code(ip, name):
                 return country
     except Exception:
         pass
-        
     return "Unknown"
 
 # =====================================================================
-# СИНХРОНИЗИРОВАННЫЙ И ОТКАЗОУСТОЙЧИВЫЙ CHECK-HOST ПАРСЕР
+# СИНХРОНИЗИРОВАННЫЙ CHECK-HOST ПАРСЕР
 # =====================================================================
 def test_port_from_russia_check_host(host, port, timeout=12):
-    """
-    Проверяет доступность TCP-порта из РФ через API Check-Host.
-    Создание задач защищено threading.Lock для предотвращения 429 блокировок.
-    """
     global CHECK_HOST_LOCK
-    
-    target_nodes = [
-        "ru2.node.check-host.net",
-        "ru4.node.check-host.net"
-    ]
-    
+    target_nodes = ["ru2.node.check-host.net", "ru4.node.check-host.net"]
     base_url = "https://check-host.net/check-tcp"
     query_params = [("host", f"{host}:{port}")]
     for node in target_nodes:
         query_params.append(("node", node))
-        
     url = f"{base_url}?{urllib.parse.urlencode(query_params)}"
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    
+    headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
     request_id = None
-    # Синхронизируем вызовы создания задачи ( throttling )
     with CHECK_HOST_LOCK:
         try:
             req = urllib.request.Request(url, headers=headers)
@@ -503,35 +439,27 @@ def test_port_from_russia_check_host(host, port, timeout=12):
                 request_id = res.get("request_id")
         except Exception:
             request_id = None
-        # Даем гарантированное окно в 1.8с перед отправкой следующего запроса
         time.sleep(1.8)
-        
     if not request_id:
         return None
-        
     poll_url = f"https://check-host.net/check-result/{request_id}"
     start_time = time.time()
     required_successes = 1
-    
     while time.time() - start_time < timeout:
         try:
             time.sleep(2.0)
             poll_req = urllib.request.Request(poll_url, headers=headers)
             with urllib.request.urlopen(poll_req, timeout=4) as pr:
                 poll_res = json.loads(pr.read().decode('utf-8'))
-                
                 if not isinstance(poll_res, dict):
                     continue
-                    
                 successes = 0
                 pending = 0
-                
                 for node in target_nodes:
                     node_res = poll_res.get(node)
                     if node_res is None:
                         pending += 1
                         continue
-                    
                     node_success = False
                     for item in node_res:
                         if isinstance(item, list) and len(item) > 0:
@@ -540,86 +468,49 @@ def test_port_from_russia_check_host(host, port, timeout=12):
                                 break
                     if node_success:
                         successes += 1
-                
                 if successes >= required_successes:
                     return True
-                
                 if pending == 0:
                     return False
         except Exception:
-            # Игнорируем временные сбои и ошибки лимитов при опросе, продолжая цикл
             pass
-            
     return None
 
 # =====================================================================
 # GLOBALPING ПАРСЕР HTTP СТАТУС-КОДОВ
 # =====================================================================
 def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_header=None):
-    """
-    Проверяет доступность из РФ через Globalping с использованием общего пула РФ.
-    """
     global RATE_LIMITED, globalping_tests_count
-    
     if RATE_LIMITED:
         return None
-        
     if globalping_tests_count >= MAX_GLOBALPING_TESTS_PER_RUN:
         RATE_LIMITED = True
         return None
-
     url = "https://api.globalping.io/v1/measurements"
     limit_probes = 2
-    
     req_host = sni if sni else (host_header if host_header else host)
     locations = [{"magic": "RU"}]
-    
     if is_tls:
         payload = {
-            "type": "http",
-            "target": host,
-            "locations": locations,
-            "limit": limit_probes,
-            "measurementOptions": {
-                "port": int(port),
-                "protocol": "HTTPS",
-                "request": {
-                    "method": "GET",
-                    "path": "/",
-                    "host": req_host
-                }
-            }
+            "type": "http", "target": host, "locations": locations, "limit": limit_probes,
+            "measurementOptions": {"port": int(port), "protocol": "HTTPS", "request": {"method": "GET", "path": "/", "host": req_host}}
         }
     else:
         payload = {
-            "type": "ping",
-            "target": host,
-            "locations": locations,
-            "limit": limit_probes,
-            "measurementOptions": {
-                "protocol": "TCP",
-                "port": int(port),
-                "packets": 2
-            }
+            "type": "ping", "target": host, "locations": locations, "limit": limit_probes,
+            "measurementOptions": {"protocol": "TCP", "port": int(port), "packets": 2}
         }
-        
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
     if GLOBALPING_TOKEN:
         headers["Authorization"] = f"Bearer {GLOBALPING_TOKEN}"
-    
     try:
         globalping_tests_count += limit_probes
-        
         req = urllib.request.Request(url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=5) as r:
             res = json.loads(r.read().decode('utf-8'))
             m_id = res.get("id")
             if not m_id:
                 return None
-                
         poll_url = f"https://api.globalping.io/v1/measurements/{m_id}"
         start_time = time.time()
         while time.time() - start_time < timeout:
@@ -629,12 +520,10 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
                 with urllib.request.urlopen(poll_req, timeout=4) as pr:
                     poll_res = json.loads(pr.read().decode('utf-8'))
                     status = poll_res.get("status")
-                    
                     if status == "finished":
                         results = poll_res.get("results", [])
                         if not results:
                             return None
-                        
                         success_count = 0
                         for r_item in results:
                             probe_result = r_item.get("result", {})
@@ -648,14 +537,12 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
                                     loss = stats.get("loss", 100)
                                     if loss < 100:
                                         success_count += 1
-                                        
                         return success_count > 0
-                            
                     elif status == "failed":
                         return False
             except urllib.error.HTTPError as e:
                 if e.code == 429:
-                    print(" [!] Превышен лимит запросов при опросе статуса Globalping (HTTP 429).")
+                    print(" [!] Превышен лимит запросов Globalping (HTTP 429).")
                     RATE_LIMITED = True
                     return None
             except Exception:
@@ -671,7 +558,6 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
 
 def get_rename_tag(country_code, index):
     global COUNTRY_INFO
-    
     info = COUNTRY_INFO.get(country_code)
     if info:
         return f"{info['flag']} {info['ru_name']} #{index}"
@@ -701,11 +587,18 @@ def rename_vmess_config(raw_url, new_name):
     return f"vmess://{encoded}"
 
 # =====================================================================
-# ВОРКЕР С ПРИНЦИПОМ ПРЕЗУМПЦИИ РАБОТОСПОСОБНОСТИ И SKIP ДЛЯ UDP
+# ВОРКЕР С АДАПТАЦИЕЙ ПОД ЛОКАЛЬНЫЙ ПК
 # =====================================================================
 def check_ru_accessibility_worker(conf):
-    protocol = conf.get("protocol", "").lower()
+    global RUN_ON_LOCAL_RU_PC
     
+    # Если скрипт запущен локально на ПК в РФ, то первичная проверка 
+    # check_tls_or_tcp_worker (которая уже успешно прошла с вашего домашнего IP) 
+    # на 100% доказывает работоспособность сервера в РФ. Внешние API не нужны!
+    if RUN_ON_LOCAL_RU_PC:
+        return conf
+        
+    protocol = conf.get("protocol", "").lower()
     if protocol in ["hysteria2", "tuic"]:
         return conf
 
@@ -717,7 +610,6 @@ def check_ru_accessibility_worker(conf):
     
     # 1. Проверяем через Check-Host
     is_alive_check_host = test_port_from_russia_check_host(host, port)
-    
     if is_alive_check_host is True:
         return conf
     elif is_alive_check_host is False:
@@ -726,24 +618,22 @@ def check_ru_accessibility_worker(conf):
         
     # 2. Если Check-Host перегружен, пробуем Globalping
     is_alive_globalping = test_port_from_russia(host, port, is_tls=is_tls, sni=sni, host_header=host_header)
-    
     if is_alive_globalping is True:
         return conf
     elif is_alive_globalping is False:
         print(f"    [-] Проверен из РФ (Globalping): {host}:{port} ({conf.get('country')}) -> ЗАБЛОКИРОВАН")
         return None
         
-    # 3. Если ОБА API недоступны, сохраняем по умолчанию
+    # 3. Сохраняем по умолчанию
     print(f"    [?] Не удалось проверить {host}:{port} ({conf.get('country')}) из-за лимитов API. Сохранен по умолчанию.")
     return conf
 
 # =====================================================================
-# ДВУХЭТАПНАЯ ПРОВЕРКА БЕЗ ИСКУССТВЕННЫХ ЛИМИТОВ
+# ОПТИМИЗИРОВАННАЯ ДВУХЭТАПНАЯ ПРОВЕРКА
 # =====================================================================
 def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=None):
     if not raw_configs:
         return []
-    
     alive_globally = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(check_tls_or_tcp_worker, r): r for r in raw_configs}
@@ -754,12 +644,9 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
                     alive_globally.append(res)
             except Exception:
                 pass
-                
     if not alive_globally:
         return []
-        
     random.shuffle(alive_globally)
-    
     seen = set()
     deduped_alive = []
     for conf in alive_globally:
@@ -768,25 +655,23 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
             seen.add(key)
             deduped_alive.append(conf)
     alive_globally = deduped_alive
-    
     filtered_candidates = []
     for conf in alive_globally:
         country = get_country_code(conf["ip"], conf["name"])
         conf["country"] = country
-        
         if selected_by_country and len(selected_by_country[country]) >= 5:
             continue
-            
         filtered_candidates.append(conf)
-        
     if not filtered_candidates:
         return []
-        
     candidates_to_check = filtered_candidates
     
-    print(f"[*] Локально доступны: {len(alive_globally)} шт. (после фильтрации забитых стран осталось: {len(filtered_candidates)} шт.)")
-    print(f"[*] Запуск проверки {len(candidates_to_check)} узлов из РФ...")
-    
+    if RUN_ON_LOCAL_RU_PC:
+        print(f"[*] Локально доступны: {len(alive_globally)} шт. Скрипт запущен на ПК в РФ, прямая проверка завершена.")
+    else:
+        print(f"[*] Локально доступны: {len(alive_globally)} шт. (после фильтрации забитых стран осталось: {len(filtered_candidates)} шт.)")
+        print(f"[*] Запуск проверки {len(candidates_to_check)} узлов из РФ...")
+        
     verified = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(check_ru_accessibility_worker, conf): conf for conf in candidates_to_check}
@@ -797,7 +682,6 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
                     verified.append(res)
             except Exception:
                 pass
-                
     return verified
 
 def run_aggregation():
@@ -805,12 +689,10 @@ def run_aggregation():
     geoip_calls_count = 0
     RATE_LIMITED = False
     globalping_tests_count = 0
-    
     selected_by_country = defaultdict(list)
     selected_raws = set()
     selected_fingerprints = set()
     
-    # 1. ЗАГРУЖАЕМ И ПРОВЕРЯЕМ СТАРЫЕ КОНФИГУРАЦИИ
     old_configs = []
     if os.path.exists("subscription.txt"):
         try:
@@ -826,12 +708,10 @@ def run_aggregation():
         print("[*] Перемешивание и проверка старых конфигураций в первую очередь...")
         random.shuffle(unique_old)
         alive_old = verify_configs_optimized(unique_old, selected_by_country=selected_by_country)
-        
         for conf in alive_old:
             country = conf["country"]
             parsed = parse_config(conf["raw"])
             fp = get_backend_fingerprint(parsed) if parsed else None
-            
             if fp and fp not in selected_fingerprints and len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                 selected_by_country[country].append(conf)
                 selected_raws.add(conf["raw"])
@@ -841,19 +721,14 @@ def run_aggregation():
     total_selected = len(selected_raws)
     print(f"[*] После проверки старой подписки сохранено рабочих узлов: {total_selected}/50.")
     
-    # 2. ЕСЛИ УЗЛОВ МЕНЬШЕ 50 — ДОБИРАЕМ ИЗ НОВЫХ ИСТОЧНИКОВ
     if total_selected < 50:
         print("[*] Начинаем сбор новых конфигураций для добора...")
         new_raw_configs = []
-        
         new_raw_configs.extend(fetch_local_file())
-        
         for url in RAW_URLS:
             new_raw_configs.extend(fetch_raw_url(url))
-            
         all_new_raws = list(set(new_raw_configs) - selected_raws)
         all_new_raws = deduplicate_raw_configs(all_new_raws)
-        
         all_new_raws_filtered = []
         for raw in all_new_raws:
             parsed = parse_config(raw)
@@ -862,74 +737,56 @@ def run_aggregation():
                 if fp not in selected_fingerprints:
                     all_new_raws_filtered.append(raw)
         all_new_raws = all_new_raws_filtered
-        
         test_queue = list(all_new_raws)
         random.shuffle(test_queue)
-        
         batch_size = 15
         print(f"[*] Для тестирования доступно {len(test_queue)} новых уникальных кандидатов.")
         print(f"[*] Начинаем порционный опрос пачками по {batch_size}...")
-        
         test_queue_index = 0
         while test_queue_index < len(test_queue):
             if len(selected_raws) >= 50:
                 break
-                
             batch = []
             while len(batch) < batch_size and test_queue_index < len(test_queue):
                 raw_conf = test_queue[test_queue_index]
                 test_queue_index += 1
-                
                 parsed = parse_config(raw_conf)
                 if not parsed:
                     continue
-                
                 est_country = detect_country_from_name(parsed["name"])
                 if est_country and len(selected_by_country[est_country]) >= 5:
                     continue
-                    
                 batch.append(raw_conf)
-                
             if not batch:
                 break
-                
             print(f"[*] Проверка пачки из {len(batch)} новых кандидатов...")
             verified_batch = verify_configs_optimized(batch, selected_by_country=selected_by_country)
-            
             for conf in verified_batch:
                 country = conf["country"]
                 parsed = parse_config(conf["raw"])
                 fp = get_backend_fingerprint(parsed) if parsed else None
-                
                 if fp and fp not in selected_fingerprints and len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                     selected_by_country[country].append(conf)
                     selected_raws.add(conf["raw"])
                     selected_fingerprints.add(fp)
                     print(f"    [+] Добавлен новый уникальный сервер: {conf['protocol']}://{conf['host']}:{conf['port']} ({country})")
-                    
                 if len(selected_raws) >= 50:
                     break
                     
-    # 3. СБОРКА И ПЕРЕИМЕНОВАНИЕ ФИНАЛЬНОГО СПИСКА
     final_selection = []
     for country in selected_by_country:
         final_selection.extend(selected_by_country[country])
-        
     renamed_lines = []
     country_counters = defaultdict(int)
-    
     for conf in final_selection:
         country_code = conf["country"]
         country_counters[country_code] += 1
         index = country_counters[country_code]
-        
         new_name = get_rename_tag(country_code, index)
-        
         if conf["protocol"] == "vmess":
             renamed_raw = rename_vmess_config(conf["raw"], new_name)
         else:
             renamed_raw = rename_non_vmess_config(conf["raw"], new_name)
-            
         renamed_lines.append(renamed_raw)
         
     header_comments = [
@@ -940,21 +797,16 @@ def run_aggregation():
         "#announce: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры",
         "#description: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры"
     ]
-    
     all_output_lines = header_comments + renamed_lines
-    
     stats = defaultdict(int)
     for f in final_selection:
         stats[f['country']] += 1
-        
     print("\n[+] Распределение стран в финальной подписке (всего записей: {}):".format(len(final_selection)))
     for country, count in stats.items():
         print(f"    - {country}: {count} шт.")
-        
     with open("subscription.txt", "w", encoding="utf-8") as f:
         f.write("\n".join(all_output_lines))
     print("\n[+] Файл 'subscription.txt' успешно перезаписан.")
-    
     base64_content = base64.b64encode("\n".join(all_output_lines).encode("utf-8")).decode("utf-8")
     with open("subscription_base64.txt", "w", encoding="utf-8") as f:
         f.write(base64_content)
