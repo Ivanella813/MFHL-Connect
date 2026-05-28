@@ -17,9 +17,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # =====================================================================
 # НАСТРОЙКА ЛОКАЛЬНОГО ЗАПУСКА
 # =====================================================================
-# Установите True, если этот скрипт запускается на вашем домашнем ПК в РФ 
-# (через Self-Hosted Runner или локально). Скрипт отключит внешние API 
-# и проверит все узлы напрямую через ваш домашний интернет-канал!
 RUN_ON_LOCAL_RU_PC = True 
 
 # =====================================================================
@@ -97,7 +94,8 @@ MAX_GLOBALPING_TESTS_PER_RUN = 210
 def decode_if_base64(text):
     clean_text = text.strip()
     normalized_text = re.sub(r'\s+', '', clean_text)
-    if re.match(r'^[A-Za-0-9+/=\-_]+$', normalized_text) and not normalized_text.startswith("vless://") and not normalized_text.startswith("vmess://") and len(normalized_text) > 40:
+    # Исправлено регулярное выражение: восстановлен корректный диапазон [A-Za-z0-9]
+    if re.match(r'^[A-Za-z0-9+/=\-_]+$', normalized_text) and not normalized_text.startswith("vless://") and not normalized_text.startswith("vmess://") and len(normalized_text) > 40:
         try:
             normalized_text = normalized_text.replace('-', '+').replace('_', '/')
             normalized_text += "=" * ((4 - len(normalized_text) % 4) % 4)
@@ -592,9 +590,6 @@ def rename_vmess_config(raw_url, new_name):
 def check_ru_accessibility_worker(conf):
     global RUN_ON_LOCAL_RU_PC
     
-    # Если скрипт запущен локально на ПК в РФ, то первичная проверка 
-    # check_tls_or_tcp_worker (которая уже успешно прошла с вашего домашнего IP) 
-    # на 100% доказывает работоспособность сервера в РФ. Внешние API не нужны!
     if RUN_ON_LOCAL_RU_PC:
         return conf
         
