@@ -17,22 +17,17 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Aggregator (Once)
-        shell: powershell # <--- ИЗМЕНЕНО: Используем нативный PowerShell вашей Windows
+        shell: cmd # <--- ИЗМЕНЕНО: Используем стандартную командную строку Windows
         run: |
           python -c "import main; main.run_aggregation()"
 
       - name: Commit and Push Changes
-        shell: powershell # <--- ИЗМЕНЕНО: Команды Git адаптированы под PowerShell
+        shell: cmd # <--- ИЗМЕНЕНО: Команды адаптированы под CMD Windows
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add subscription.txt subscription_base64.txt
           
-          # Проверяем, изменились ли файлы подписки, чтобы избежать ошибки пустого коммита
-          $status = git status --porcelain
-          if ($status) {
-              git commit -m "Auto-update subscription [skip ci]"
-              git push
-          } else {
-              Write-Host "No changes to commit. Subscription is already up-to-date."
-          }
+          :: Пытаемся сделать коммит. Если изменений нет, команда проигнорирует ошибку и не упадет
+          git commit -m "Auto-update subscription [skip ci]" || ver > nul
+          git push
