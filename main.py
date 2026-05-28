@@ -142,7 +142,7 @@ def fetch_raw_url(url):
 
 def decode_base64_vmess(vmess_str):
     try:
-        b64_data = vmess_str[8:]
+        b64_data = vmoss_str = vmess_str[8:]
         b64_data += "=" * ((4 - len(b64_data) % 4) % 4)
         decoded = base64.b64decode(b64_data).decode('utf-8', errors='ignore')
         return json.loads(decoded)
@@ -464,20 +464,19 @@ def get_country_code(ip, name):
     return "Unknown"
 
 # =====================================================================
-# ПРОВЕРКА ЧЕРЕЗ CHECK-HOST С ОПРЕДЕЛЕНИЕМ НЕОПРЕДЕЛЕННЫХ РЕЗУЛЬТАТОВ
+# ИСПРАВЛЕННЫЙ CHECK-HOST TCP ПАРСЕР
 # =====================================================================
 def test_port_from_russia_check_host(host, port, timeout=12):
     """
-    Проверяет доступность TCP-порта из РФ через Check-Host.
+    Проверяет доступность TCP-порта из РФ через API Check-Host.
     Возвращает:
       True  - если подтверждено, что порт открыт в РФ.
       False - если подтверждено, что порт закрыт/заблокирован.
       None  - если лимиты API превышены, ошибка сети или таймаут (Inconclusive).
     """
+    # Ноды Москва (MMTS-9) и Екатеринбург (Ростелеком)
     target_nodes = [
-        "ru1.node.check-host.net",
         "ru2.node.check-host.net",
-        "ru3.node.check-host.net",
         "ru4.node.check-host.net"
     ]
     
@@ -493,7 +492,7 @@ def test_port_from_russia_check_host(host, port, timeout=12):
     }
     
     try:
-        time.sleep(random.uniform(0.1, 0.5))
+        time.sleep(random.uniform(0.1, 0.4))
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=5) as r:
             res = json.loads(r.read().decode('utf-8'))
@@ -518,7 +517,6 @@ def test_port_from_russia_check_host(host, port, timeout=12):
                     continue
                     
                 successes = 0
-                failures = 0
                 pending = 0
                 
                 for node in target_nodes:
@@ -529,14 +527,13 @@ def test_port_from_russia_check_host(host, port, timeout=12):
                     
                     node_success = False
                     for item in node_res:
-                        if isinstance(item, dict):
-                            if "time" in item and "error" not in item:
+                        # Исправлено: Check-Host возвращает TCP-результаты списком, а не словарем
+                        if isinstance(item, list) and len(item) > 0:
+                            if item[0] == 1:
                                 node_success = True
                                 break
                     if node_success:
                         successes += 1
-                    else:
-                        failures += 1
                 
                 if successes >= required_successes:
                     return True
@@ -549,7 +546,7 @@ def test_port_from_russia_check_host(host, port, timeout=12):
     return None
 
 # =====================================================================
-# GLOBALPING С ОБРАБОТКОЙ ОШИБОК И ЛИМИТОВ
+# ИСПРАВЛЕННЫЙ GLOBALPING ПАРСЕР HTTP СТАТУС-КОДОВ
 # =====================================================================
 def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_header=None):
     """
@@ -572,14 +569,7 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
     limit_probes = 2
     
     req_host = sni if sni else (host_header if host_header else host)
-    
-    locations = [
-        {"magic": "AS12389"},  # Ростелеком
-        {"magic": "AS8359"},   # МТС
-        {"magic": "AS31133"},  # Мегафон
-        {"magic": "AS3216"},   # Билайн
-        {"magic": "RU+eyeball"}
-    ]
+    locations = [{"magic": "RU"}] # Используем стабильный общий пул РФ, чтобы избежать нехватки зондов
     
     if is_tls:
         payload = {
@@ -646,7 +636,10 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
                         for r_item in results:
                             probe_result = r_item.get("result", {})
                             if is_tls:
-                                if probe_result.get("status") != "failed":
+                                # Исправлено: Зонды таймауты помечают как "finished", но без statusCode.
+                                # Успешный TLS-хэндшейк обязан вернуть валидный код ответа.
+                                status_code = probe_result.get("statusCode")
+                                if isinstance(status_code, int) and status_code > 0:
                                     success_count += 1
                             else:
                                 if probe_result.get("status") != "failed":
@@ -707,9 +700,16 @@ def rename_vmess_config(raw_url, new_name):
     return f"vmess://{encoded}"
 
 # =====================================================================
-# ВОРКЕР С ПРИНЦИПОМ ПРЕЗУМПЦИИ РАБОТОСПОСОБНОСТИ
+# ВОРКЕР С ПРИНЦИПОМ ПРЕЗУМПЦИИ РАБОТОСПОСОБНОСТИ И SKIP ДЛЯ UDP
 # =====================================================================
 def check_ru_accessibility_worker(conf):
+    protocol = conf.get("protocol", "").lower()
+    
+    # Исправлено: Hysteria2 и TUIC работают по UDP, их невозможно корректно проверить по TCP/HTTP.
+    # Пропускаем, так как они высокоустойчивы и уже прошли глобальную проверку.
+    if protocol in ["hysteria2", "tuic"]:
+        return conf
+
     host = conf["host"]
     port = conf["port"]
     is_tls = conf.get("is_tls", False)
@@ -735,7 +735,6 @@ def check_ru_accessibility_worker(conf):
         return None
         
     # 3. Если ОБА API недоступны (лимиты превышены), мы СОХРАНЯЕМ сервер.
-    # Он глобально жив, и мы не можем подтвердить блокировку в РФ.
     print(f"    [?] Не удалось проверить {host}:{port} ({conf.get('country')}) из-за лимитов API. Сохранен по умолчанию.")
     return conf
 
@@ -784,11 +783,10 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
     if not filtered_candidates:
         return []
         
-    # УБРАН ОГРАНИЧИТЕЛЬ [:15]. Проверяются все доступные серверы.
     candidates_to_check = filtered_candidates
     
     print(f"[*] Локально доступны: {len(alive_globally)} шт. (после фильтрации забитых стран осталось: {len(filtered_candidates)} шт.)")
-    print(f"[*] Запуск проверки {len(candidates_to_check)} узлов из РФ через резидентные зонды и Check-Host...")
+    print(f"[*] Запуск проверки {len(candidates_to_check)} узлов из РФ...")
     
     verified = []
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -811,6 +809,7 @@ def run_aggregation():
     
     selected_by_country = defaultdict(list)
     selected_raws = set()
+    selected_fingerprints = set() # Исправлено: Глобальный набор уникальных фингерпринтов серверов
     
     # 1. ЗАГРУЖАЕМ И ПРОВЕРЯЕМ СТАРЫЕ КОНФИГУРАЦИИ
     old_configs = []
@@ -831,10 +830,14 @@ def run_aggregation():
         
         for conf in alive_old:
             country = conf["country"]
+            parsed = parse_config(conf["raw"])
+            fp = get_backend_fingerprint(parsed) if parsed else None
             
-            if len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
+            # Строгая проверка на дублирование физического бэкенда
+            if fp and fp not in selected_fingerprints and len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                 selected_by_country[country].append(conf)
                 selected_raws.add(conf["raw"])
+                selected_fingerprints.add(fp)
                 print(f"    [+] Старый рабочий сервер сохранен: {conf['protocol']}://{conf['host']}:{conf['port']} ({country})")
                 
     total_selected = len(selected_raws)
@@ -853,12 +856,22 @@ def run_aggregation():
         all_new_raws = list(set(new_raw_configs) - selected_raws)
         all_new_raws = deduplicate_raw_configs(all_new_raws)
         
+        # Исправлено: Очищаем список новых кандидатов от тех, у кого бэкенд уже добавлен в подписку
+        all_new_raws_filtered = []
+        for raw in all_new_raws:
+            parsed = parse_config(raw)
+            if parsed:
+                fp = get_backend_fingerprint(parsed)
+                if fp not in selected_fingerprints:
+                    all_new_raws_filtered.append(raw)
+        all_new_raws = all_new_raws_filtered
+        
         test_queue = list(all_new_raws)
         random.shuffle(test_queue)
         
         batch_size = 15
         print(f"[*] Для тестирования доступно {len(test_queue)} новых уникальных кандидатов.")
-        print(f"[*] Начинаем порционный опрос пачками по {batch_size} до заполнения лимита...")
+        print(f"[*] Начинаем порционный опрос пачками по {batch_size}...")
         
         test_queue_index = 0
         while test_queue_index < len(test_queue):
@@ -888,10 +901,13 @@ def run_aggregation():
             
             for conf in verified_batch:
                 country = conf["country"]
+                parsed = parse_config(conf["raw"])
+                fp = get_backend_fingerprint(parsed) if parsed else None
                 
-                if len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
+                if fp and fp not in selected_fingerprints and len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                     selected_by_country[country].append(conf)
                     selected_raws.add(conf["raw"])
+                    selected_fingerprints.add(fp)
                     print(f"    [+] Добавлен новый уникальный сервер: {conf['protocol']}://{conf['host']}:{conf['port']} ({country})")
                     
                 if len(selected_raws) >= 50:
