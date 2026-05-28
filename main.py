@@ -148,28 +148,6 @@ def decode_base64_vmess(vmess_str):
     except Exception:
         return None
 
-# =====================================================================
-# ОПРЕДЕЛЕНИЕ ТИРА УСТОЙЧИВОСТИ К ТСПУ
-# =====================================================================
-def get_protocol_tier(parsed):
-    """
-    Классифицирует обфускацию протокола:
-    Tier 1 - Высокая устойчивость к DPI (Reality, WS, gRPC, HTTPUpgrade, Hysteria2, TUIC)
-    Tier 2 - Слабая устойчивость (SS, plain Trojan, plain VLESS/VMess через TCP)
-    """
-    protocol = parsed.get("protocol", "").lower()
-    if protocol in ["hysteria2", "tuic"]:
-        return 1
-        
-    is_reality = parsed.get("is_reality", False)
-    is_ws = parsed.get("is_ws", False)
-    is_grpc = parsed.get("is_grpc", False)
-    is_httpupgrade = parsed.get("is_httpupgrade", False)
-    
-    if is_reality or is_ws or is_grpc or is_httpupgrade:
-        return 1
-    return 2
-
 def parse_config(config_str):
     try:
         if "127.0.0.1" in config_str or "localhost" in config_str:
@@ -184,7 +162,7 @@ def parse_config(config_str):
                 is_httpupgrade = net_type == "httpupgrade"
                 path = data.get("path", "/")
                 host_header = data.get("host")
-                parsed_dict = {
+                return {
                     "protocol": "vmess",
                     "host": data.get("add"),
                     "port": int(data.get("port", 443)),
@@ -200,8 +178,6 @@ def parse_config(config_str):
                     "sni": data.get("sni"),
                     "raw": config_str
                 }
-                parsed_dict["tier"] = get_protocol_tier(parsed_dict)
-                return parsed_dict
         else:
             parsed = urlparse(config_str)
             protocol = parsed.scheme
@@ -251,7 +227,7 @@ def parse_config(config_str):
             if protocol in ["trojan", "hysteria2", "tuic"]:
                 is_tls = True
                 
-            parsed_dict = {
+            return {
                 "protocol": protocol,
                 "host": host,
                 "port": port,
@@ -267,8 +243,6 @@ def parse_config(config_str):
                 "host_header": host_header,
                 "raw": config_str
             }
-            parsed_dict["tier"] = get_protocol_tier(parsed_dict)
-            return parsed_dict
     except Exception:
         pass
     return None
@@ -295,9 +269,6 @@ def deduplicate_raw_configs(raw_configs):
         parsed = parse_config(raw)
         if not parsed:
             continue
-        # Исключаем гарантированно блокируемые ТСПУ протоколы (Tier 2) из обработки
-        if parsed.get("tier", 2) == 2:
-            continue
         fingerprint = get_backend_fingerprint(parsed)
         if fingerprint not in seen_fingerprints:
             seen_fingerprints.add(fingerprint)
@@ -316,7 +287,7 @@ def detect_country_from_name(name):
         "🇮🇸": "IS", "🇨🇿": "CZ", "🇮🇪": "IE", "🇮🇳": "IN", "🇵🇹": "PT",
         "🇳🇴": "NO", "🇬🇷": "GR", "🇧🇪": "BE", "🇨🇾": "CY", "🇲🇩": "MD",
         "🇬🇪": "GE", "🇦🇲": "AM", "🇦🇿": "AZ", "🇦🇪": "AE", "🇦🇺": "AU",
-        "🇧🇷": "BR", "🇿🇦": "ZA", "🇱🇹": "LT"
+        "BR": "BR", "🇿🇦": "ZA", "🇱🇹": "LT"
     }
     for flag, code in country_flags.items():
         if flag in name:
@@ -385,7 +356,7 @@ def test_websocket_node(ip, port, is_tls, host, path, host_header=None, timeout=
         return False
 
 # =====================================================================
-# ИСПРАВЛЕННАЯ СТРОГАЯ ПРОВЕРКА НА УРОВНЕ РУКОПОЖАТИЙ (HANDSHAKES)
+# СТРОГАЯ ПРОВЕРКА НА УРОВНЕ РУКОПОЖАТИЙ (HANDSHAKES)
 # =====================================================================
 def test_node_connection(host, port, protocol, is_tls=False, sni=None, is_ws=False, path=None, host_header=None, timeout=2.5):
     try:
@@ -393,32 +364,30 @@ def test_node_connection(host, port, protocol, is_tls=False, sni=None, is_ws=Fal
     except socket.gaierror:
         return None
         
-    # 1. Если это WebSocket (WS) — выполняем полноценный HTTP Upgrade запрос
     if is_ws:
         success = test_websocket_node(ip, port, is_tls, host, path, host_header, timeout)
         return ip if success else None
         
-    # 2. Если это TLS / Reality — выполняем полноценное TLS-рукопожатие (Client Hello)
     if is_tls:
         try:
-            # Создаем контекст, мимикрирующий под стандартный браузер
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             
             with socket.create_connection((ip, port), timeout=timeout) as sock:
-                # server_hostname отправляет SNI, провоцируя ТСПУ на проверку сигнатур.
-                # Если ТСПУ заблокировал этот SNI или IP, рукопожатие завершится ошибкой или таймаутом.
                 with context.wrap_socket(sock, server_hostname=sni if sni else host) as ssl_sock:
                     ssl_sock.getpeercert()  # Убеждаемся, что хэндшейк завершился успешно
                     return ip
         except Exception:
             return None
             
-    # 3. Если это голый TCP без TLS/WS (plain SS, plain Trojan, VLESS TCP):
-    # Мы больше НЕ используем обычный TCP-пинг, так как он пропускает заблокированные ТСПУ серверы.
-    # Сразу отбрасываем такие узлы как непроверяемые и гарантированно блокируемые.
-    return None
+    # Для голых протоколов без TLS и WS (например, обычный Shadowsocks, голый Trojan, голый VLESS TCP)
+    # возвращаем обычное TCP-подключение. Это лучше, чем ничего, и не будет ложно отбраковывать их.
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return ip
+    except Exception:
+        return None
 
 def check_tls_or_tcp_worker(raw_conf):
     parsed = parse_config(raw_conf)
