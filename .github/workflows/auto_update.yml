@@ -7,36 +7,30 @@ on:
   workflow_dispatch: # Позволяет запустить процесс вручную кнопкой
 
 permissions:
-  contents: write    # Важно: дает права на запись обновленных файлов в ваш репозиторий
+  contents: write    # Права на запись в репозиторий
 
 jobs:
   update:
-    runs-on: self-hosted 
+    runs-on: ubuntu-latest   # ← GitHub-hosted раннер
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Автоматически настраиваем Python для текущей сессии
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Run Aggregator (Once)
-        shell: cmd # Используем командную строку (CMD не имеет блокировок PowerShell)
         run: |
           python -c "import main; main.run_aggregation()"
 
       - name: Commit and Push Changes
-        shell: cmd # Используем командную строку (CMD не имеет блокировок PowerShell)
         run: |
-          # Разрешаем Git работать в этой папке в обход системных конфликтов прав Windows
-          git config --global --add safe.directory *
-          
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add subscription.txt subscription_base64.txt
-          
-          :: Пытаемся сделать коммит. Если изменений нет, команда проигнорирует ошибку и не упадет
-          git commit -m "Auto-update subscription [skip ci]" || ver > nul
+          # Если изменений нет – команда не упадёт благодаря || true
+          git commit -m "Auto-update subscription [skip ci]" || true
           git push
