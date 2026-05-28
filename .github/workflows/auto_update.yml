@@ -11,22 +11,28 @@ permissions:
 
 jobs:
   update:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted # <--- ИЗМЕНЕНО: Скрипт будет выполняться на вашем ПК
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Опциональный шаг. На некоторых self-hosted ПК установка Python через экшен 
+      # может завершаться ошибкой из-за отсутствия прав Администратора. 
+      # Если у вас на ПК Python уже установлен глобально, и этот шаг будет выдавать ошибку, 
+      # вы можете полностью удалить блок "Set up Python" — скрипт просто использует вашу локальную систему.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
 
       - name: Run Aggregator (Once)
+        shell: bash # <--- ИЗМЕНЕНО: Гарантирует запуск через Bash (Windows/Linux/macOS)
         run: |
           # Запускаем наш файл main.py один раз
           python -c "import main; main.run_aggregation()"
 
       - name: Commit and Push Changes
+        shell: bash # <--- ИЗМЕНЕНО: Защищает от ошибок синтаксиса в Windows PowerShell
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
