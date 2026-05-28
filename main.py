@@ -9,6 +9,7 @@ import time
 import os
 import ssl
 import random
+import threading
 from collections import defaultdict
 from urllib.parse import urlparse, unquote, quote
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -84,6 +85,9 @@ MAX_GEOIP_CALLS = 40
 # Переменная токена для Globalping
 GLOBALPING_TOKEN = os.getenv("GLOBALPING_TOKEN", "ozuwucpiutcobvnboqlrpxt6nggf2jqv")
 
+# Глобальный лок для Check-Host
+CHECK_HOST_LOCK = threading.Lock()
+
 # Ограничители лимитов Globalping
 RATE_LIMITED = False
 globalping_tests_count = 0
@@ -142,7 +146,7 @@ def fetch_raw_url(url):
 
 def decode_base64_vmess(vmess_str):
     try:
-        b64_data = vmoss_str = vmess_str[8:]
+        b64_data = vmess_str[8:]
         b64_data += "=" * ((4 - len(b64_data) % 4) % 4)
         decoded = base64.b64decode(b64_data).decode('utf-8', errors='ignore')
         return json.loads(decoded)
@@ -464,17 +468,15 @@ def get_country_code(ip, name):
     return "Unknown"
 
 # =====================================================================
-# ИСПРАВЛЕННЫЙ CHECK-HOST TCP ПАРСЕР
+# СИНХРОНИЗИРОВАННЫЙ И ОТКАЗОУСТОЙЧИВЫЙ CHECK-HOST ПАРСЕР
 # =====================================================================
 def test_port_from_russia_check_host(host, port, timeout=12):
     """
     Проверяет доступность TCP-порта из РФ через API Check-Host.
-    Возвращает:
-      True  - если подтверждено, что порт открыт в РФ.
-      False - если подтверждено, что порт закрыт/заблокирован.
-      None  - если лимиты API превышены, ошибка сети или таймаут (Inconclusive).
+    Создание задач защищено threading.Lock для предотвращения 429 блокировок.
     """
-    # Ноды Москва (MMTS-9) и Екатеринбург (Ростелеком)
+    global CHECK_HOST_LOCK
+    
     target_nodes = [
         "ru2.node.check-host.net",
         "ru4.node.check-host.net"
@@ -491,15 +493,20 @@ def test_port_from_russia_check_host(host, port, timeout=12):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     
-    try:
-        time.sleep(random.uniform(0.1, 0.4))
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=5) as r:
-            res = json.loads(r.read().decode('utf-8'))
-            request_id = res.get("request_id")
-            if not request_id:
-                return None
-    except Exception:
+    request_id = None
+    # Синхронизируем вызовы создания задачи ( throttling )
+    with CHECK_HOST_LOCK:
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as r:
+                res = json.loads(r.read().decode('utf-8'))
+                request_id = res.get("request_id")
+        except Exception:
+            request_id = None
+        # Даем гарантированное окно в 1.8с перед отправкой следующего запроса
+        time.sleep(1.8)
+        
+    if not request_id:
         return None
         
     poll_url = f"https://check-host.net/check-result/{request_id}"
@@ -507,8 +514,8 @@ def test_port_from_russia_check_host(host, port, timeout=12):
     required_successes = 1
     
     while time.time() - start_time < timeout:
-        time.sleep(1.5)
         try:
+            time.sleep(2.0)
             poll_req = urllib.request.Request(poll_url, headers=headers)
             with urllib.request.urlopen(poll_req, timeout=4) as pr:
                 poll_res = json.loads(pr.read().decode('utf-8'))
@@ -527,7 +534,6 @@ def test_port_from_russia_check_host(host, port, timeout=12):
                     
                     node_success = False
                     for item in node_res:
-                        # Исправлено: Check-Host возвращает TCP-результаты списком, а не словарем
                         if isinstance(item, list) and len(item) > 0:
                             if item[0] == 1:
                                 node_success = True
@@ -541,20 +547,17 @@ def test_port_from_russia_check_host(host, port, timeout=12):
                 if pending == 0:
                     return False
         except Exception:
-            return None
+            # Игнорируем временные сбои и ошибки лимитов при опросе, продолжая цикл
+            pass
             
     return None
 
 # =====================================================================
-# ИСПРАВЛЕННЫЙ GLOBALPING ПАРСЕР HTTP СТАТУС-КОДОВ
+# GLOBALPING ПАРСЕР HTTP СТАТУС-КОДОВ
 # =====================================================================
 def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_header=None):
     """
-    Проверяет доступность из РФ через Globalping с использованием ASN провайдеров РФ.
-    Возвращает:
-      True  - если доступен.
-      False - если заблокирован.
-      None  - если лимиты API исчерпаны или произошла ошибка (Inconclusive).
+    Проверяет доступность из РФ через Globalping с использованием общего пула РФ.
     """
     global RATE_LIMITED, globalping_tests_count
     
@@ -569,7 +572,7 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
     limit_probes = 2
     
     req_host = sni if sni else (host_header if host_header else host)
-    locations = [{"magic": "RU"}] # Используем стабильный общий пул РФ, чтобы избежать нехватки зондов
+    locations = [{"magic": "RU"}]
     
     if is_tls:
         payload = {
@@ -636,8 +639,6 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
                         for r_item in results:
                             probe_result = r_item.get("result", {})
                             if is_tls:
-                                # Исправлено: Зонды таймауты помечают как "finished", но без statusCode.
-                                # Успешный TLS-хэндшейк обязан вернуть валидный код ответа.
                                 status_code = probe_result.get("statusCode")
                                 if isinstance(status_code, int) and status_code > 0:
                                     success_count += 1
@@ -705,8 +706,6 @@ def rename_vmess_config(raw_url, new_name):
 def check_ru_accessibility_worker(conf):
     protocol = conf.get("protocol", "").lower()
     
-    # Исправлено: Hysteria2 и TUIC работают по UDP, их невозможно корректно проверить по TCP/HTTP.
-    # Пропускаем, так как они высокоустойчивы и уже прошли глобальную проверку.
     if protocol in ["hysteria2", "tuic"]:
         return conf
 
@@ -734,7 +733,7 @@ def check_ru_accessibility_worker(conf):
         print(f"    [-] Проверен из РФ (Globalping): {host}:{port} ({conf.get('country')}) -> ЗАБЛОКИРОВАН")
         return None
         
-    # 3. Если ОБА API недоступны (лимиты превышены), мы СОХРАНЯЕМ сервер.
+    # 3. Если ОБА API недоступны, сохраняем по умолчанию
     print(f"    [?] Не удалось проверить {host}:{port} ({conf.get('country')}) из-за лимитов API. Сохранен по умолчанию.")
     return conf
 
@@ -809,7 +808,7 @@ def run_aggregation():
     
     selected_by_country = defaultdict(list)
     selected_raws = set()
-    selected_fingerprints = set() # Исправлено: Глобальный набор уникальных фингерпринтов серверов
+    selected_fingerprints = set()
     
     # 1. ЗАГРУЖАЕМ И ПРОВЕРЯЕМ СТАРЫЕ КОНФИГУРАЦИИ
     old_configs = []
@@ -833,7 +832,6 @@ def run_aggregation():
             parsed = parse_config(conf["raw"])
             fp = get_backend_fingerprint(parsed) if parsed else None
             
-            # Строгая проверка на дублирование физического бэкенда
             if fp and fp not in selected_fingerprints and len(selected_by_country[country]) < 5 and len(selected_raws) < 50:
                 selected_by_country[country].append(conf)
                 selected_raws.add(conf["raw"])
@@ -856,7 +854,6 @@ def run_aggregation():
         all_new_raws = list(set(new_raw_configs) - selected_raws)
         all_new_raws = deduplicate_raw_configs(all_new_raws)
         
-        # Исправлено: Очищаем список новых кандидатов от тех, у кого бэкенд уже добавлен в подписку
         all_new_raws_filtered = []
         for raw in all_new_raws:
             parsed = parse_config(raw)
