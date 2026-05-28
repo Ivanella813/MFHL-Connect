@@ -16,13 +16,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Автоматически настраиваем Python для текущей сессии, чтобы Windows CMD гарантированно видела его
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
       - name: Run Aggregator (Once)
-        shell: cmd # <--- ИЗМЕНЕНО: Используем стандартную командную строку Windows
+        shell: cmd # Используем командную строку (CMD не имеет блокировок PowerShell)
         run: |
           python -c "import main; main.run_aggregation()"
 
       - name: Commit and Push Changes
-        shell: cmd # <--- ИЗМЕНЕНО: Команды адаптированы под CMD Windows
+        shell: cmd # Используем командную строку (CMD не имеет блокировок PowerShell)
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
