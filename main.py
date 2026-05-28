@@ -61,17 +61,15 @@ COUNTRY_INFO = {
     "AU": {"flag": "🇦🇺", "ru_name": "Австралия"},
     "BR": {"flag": "🇧🇷", "ru_name": "Бразилия"},
     "ZA": {"flag": "🇿🇦", "ru_name": "ЮАР"},
+    "LT": {"flag": "lt", "ru_name": "Литва"},
 }
 
 # Название локального файла для копирования конфигов из чатов/групп
 LOCAL_FILE = "local_configs.txt"
 
-# Специфический источник (Белые списки РФ / обход блокировок)
-SPECIAL_RU_SOURCE = "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt"
-
 # Общие источники (проверенные)
 RAW_URLS = [
-    "https://raw.githubusercontent.com/adop1344-bot/LetoVPN_free/refs/heads/main/ru.txt",
+    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt",
     "https://mifa.world/other",
     "https://sub.fawlok.me/",
 ]
@@ -700,41 +698,6 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
                 
     return verified
 
-def process_special_ru_source():
-    print(f"\n[*] Специфический сбор из источника: {SPECIAL_RU_SOURCE}")
-    raw_configs = fetch_raw_url(SPECIAL_RU_SOURCE)
-    unique_raw = list(set(raw_configs))
-    
-    optimized_raw = pre_filter_raw_configs(unique_raw, max_per_country_pre=10)
-    
-    print(f"[*] Проверка {len(optimized_raw)} серверов из спец. источника...")
-    alive_configs = verify_configs_optimized(optimized_raw)
-                
-    ru_working_configs = []
-    fallback_working_configs = []
-    
-    print("[*] Определение геолокации для спец. источника...")
-    for conf in alive_configs:
-        country = conf["country"]
-        
-        if country == "RU":
-            ru_working_configs.append(conf)
-            print(f"    [+] Найдено RU из спец. источника: {conf['protocol']}://{conf['host']}:{conf['port']}")
-            if len(ru_working_configs) >= 5:
-                break
-        else:
-            fallback_working_configs.append(conf)
-            
-    if len(ru_working_configs) < 5:
-        needed = 5 - len(ru_working_configs)
-        print(f"[!] В РФ физически находится только {len(ru_working_configs)} рабочих узлов.")
-        print(f"[*] Добираем еще {needed} рабочих узлов из этого же файла...")
-        for conf in fallback_working_configs[:needed]:
-            ru_working_configs.append(conf)
-            print(f"    [+] Добавлен резервный рабочий узел ({conf['country']}): {conf['protocol']}://{conf['host']}:{conf['port']}")
-            
-    return ru_working_configs[:5]
-
 def run_aggregation():
     global geoip_calls_count, RATE_LIMITED, globalping_tests_count
     geoip_calls_count = 0
@@ -778,12 +741,11 @@ def run_aggregation():
         new_raw_configs = []
         
         new_raw_configs.extend(fetch_local_file())
-        special_ru_raws = fetch_raw_url(SPECIAL_RU_SOURCE)
         
         for url in RAW_URLS:
             new_raw_configs.extend(fetch_raw_url(url))
             
-        all_new_raws = list(set(new_raw_configs + special_ru_raws) - selected_raws)
+        all_new_raws = list(set(new_raw_configs) - selected_raws)
         all_new_raws = deduplicate_raw_configs(all_new_raws)
         
         test_queue = list(all_new_raws)
