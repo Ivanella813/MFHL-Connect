@@ -16,19 +16,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Мы убрали шаг скачивания Python, так как он у вас уже есть!
-
       - name: Run Aggregator (Once)
-        shell: bash 
+        shell: powershell # <--- ИЗМЕНЕНО: Используем нативный PowerShell вашей Windows
         run: |
-          # Запускаем скрипт через ваш установленный локальный Python
           python -c "import main; main.run_aggregation()"
 
       - name: Commit and Push Changes
-        shell: bash 
+        shell: powershell # <--- ИЗМЕНЕНО: Команды Git адаптированы под PowerShell
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add subscription.txt subscription_base64.txt
-          git commit -m "Auto-update subscription [skip ci]" || exit 0
-          git push
+          
+          # Проверяем, изменились ли файлы подписки, чтобы избежать ошибки пустого коммита
+          $status = git status --porcelain
+          if ($status) {
+              git commit -m "Auto-update subscription [skip ci]"
+              git push
+          } else {
+              Write-Host "No changes to commit. Subscription is already up-to-date."
+          }
