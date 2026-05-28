@@ -464,18 +464,16 @@ def get_country_code(ip, name):
     return "Unknown"
 
 # =====================================================================
-# НОВАЯ ВЫСОКОТОЧНАЯ ПРОВЕРКА ЧЕРЕЗ CHECK-HOST (Ростелеком и MMTS-9)
+# ПРОВЕРКА ЧЕРЕЗ CHECK-HOST С ОПРЕДЕЛЕНИЕМ НЕОПРЕДЕЛЕННЫХ РЕЗУЛЬТАТОВ
 # =====================================================================
 def test_port_from_russia_check_host(host, port, timeout=12):
     """
-    Проверяет доступность TCP-порта из РФ с использованием API Check-Host.net.
-    Использует конкретные ноды домашних и локальных провайдеров РФ с ТСПУ.
+    Проверяет доступность TCP-порта из РФ через Check-Host.
     Возвращает:
-      True  - если порт открыт и доступен.
-      False - если проверка выполнена успешно, но порт закрыт (заблокирован в РФ).
-      None  - если произошла ошибка API или превышен лимит (нужно переключиться на фолбек).
+      True  - если подтверждено, что порт открыт в РФ.
+      False - если подтверждено, что порт закрыт/заблокирован.
+      None  - если лимиты API превышены, ошибка сети или таймаут (Inconclusive).
     """
-    # Целевые ноды в РФ (ru4 - это Ростелеком Екатеринбург, ru2 - ММТС-9 Москва)
     target_nodes = [
         "ru1.node.check-host.net",
         "ru2.node.check-host.net",
@@ -495,6 +493,7 @@ def test_port_from_russia_check_host(host, port, timeout=12):
     }
     
     try:
+        time.sleep(random.uniform(0.1, 0.5))
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=5) as r:
             res = json.loads(r.read().decode('utf-8'))
@@ -506,19 +505,20 @@ def test_port_from_russia_check_host(host, port, timeout=12):
         
     poll_url = f"https://check-host.net/check-result/{request_id}"
     start_time = time.time()
-    required_successes = 2  # Требуем успешного подключения хотя бы с 2 нод из 4
+    required_successes = 1
     
     while time.time() - start_time < timeout:
-        time.sleep(2.0)
+        time.sleep(1.5)
         try:
             poll_req = urllib.request.Request(poll_url, headers=headers)
-            with urllib.request.urlopen(poll_req, timeout=5) as pr:
+            with urllib.request.urlopen(poll_req, timeout=4) as pr:
                 poll_res = json.loads(pr.read().decode('utf-8'))
                 
                 if not isinstance(poll_res, dict):
                     continue
                     
                 successes = 0
+                failures = 0
                 pending = 0
                 
                 for node in target_nodes:
@@ -527,55 +527,57 @@ def test_port_from_russia_check_host(host, port, timeout=12):
                         pending += 1
                         continue
                     
-                    # Проверяем структуру ответа ноды (список словарей)
                     node_success = False
                     for item in node_res:
                         if isinstance(item, dict):
-                            # Если есть время ответа и нет ключа ошибки
                             if "time" in item and "error" not in item:
                                 node_success = True
                                 break
                     if node_success:
                         successes += 1
+                    else:
+                        failures += 1
                 
-                # Если минимально необходимое количество нод подключилось успешно
                 if successes >= required_successes:
                     return True
                 
-                # Если все ноды завершили опрос и мы не набрали лимит успехов - блокировка явная
                 if pending == 0:
                     return False
         except Exception:
-            pass
+            return None
             
-    return False
+    return None
 
 # =====================================================================
-# УЛУЧШЕННЫЙ GLOBALPING С ЦЕЛЕВЫМИ АБОНЕНТСКИМИ ПРОВАЙДЕРАМИ РФ
+# GLOBALPING С ОБРАБОТКОЙ ОШИБОК И ЛИМИТОВ
 # =====================================================================
 def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_header=None):
+    """
+    Проверяет доступность из РФ через Globalping с использованием ASN провайдеров РФ.
+    Возвращает:
+      True  - если доступен.
+      False - если заблокирован.
+      None  - если лимиты API исчерпаны или произошла ошибка (Inconclusive).
+    """
     global RATE_LIMITED, globalping_tests_count
     
     if RATE_LIMITED:
-        return False
+        return None
         
     if globalping_tests_count >= MAX_GLOBALPING_TESTS_PER_RUN:
         RATE_LIMITED = True
-        print(" [!] Достигнут лимит тестов Globalping на одну сессию. Пропускаем.")
-        return False
+        return None
 
     url = "https://api.globalping.io/v1/measurements"
-    limit_probes = 3
+    limit_probes = 2
     
     req_host = sni if sni else (host_header if host_header else host)
     
-    # Теперь принудительно заставляем Globalping использовать абонентские сети с ТСПУ
-    # AS12389 - Ростелеком, AS8359 - МТС, AS31133 - Мегафон, AS3216 - Билайн
     locations = [
-        {"magic": "AS12389"},
-        {"magic": "AS8359"},
-        {"magic": "AS31133"},
-        {"magic": "AS3216"},
+        {"magic": "AS12389"},  # Ростелеком
+        {"magic": "AS8359"},   # МТС
+        {"magic": "AS31133"},  # Мегафон
+        {"magic": "AS3216"},   # Билайн
         {"magic": "RU+eyeball"}
     ]
     
@@ -623,7 +625,7 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
             res = json.loads(r.read().decode('utf-8'))
             m_id = res.get("id")
             if not m_id:
-                return False
+                return None
                 
         poll_url = f"https://api.globalping.io/v1/measurements/{m_id}"
         start_time = time.time()
@@ -638,7 +640,7 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
                     if status == "finished":
                         results = poll_res.get("results", [])
                         if not results:
-                            return False
+                            return None
                         
                         success_count = 0
                         for r_item in results:
@@ -653,7 +655,7 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
                                     if loss < 100:
                                         success_count += 1
                                         
-                        return success_count == len(results) and success_count > 0
+                        return success_count > 0
                             
                     elif status == "failed":
                         return False
@@ -661,20 +663,17 @@ def test_port_from_russia(host, port, timeout=12, is_tls=True, sni=None, host_he
                 if e.code == 429:
                     print(" [!] Превышен лимит запросов при опросе статуса Globalping (HTTP 429).")
                     RATE_LIMITED = True
-                    return False
+                    return None
             except Exception:
                 pass
-        return False
+        return None
     except urllib.error.HTTPError as e:
         if e.code == 429:
-            print(" [!] API Globalping вернул HTTP 429. Прекращаем запросы в этой сессии.")
+            print(" [!] API Globalping вернул HTTP 429. Прекращаем запросы.")
             RATE_LIMITED = True
-        else:
-            print(f" [!] Ошибка связи с API Globalping ({e}). Возвращаем False.")
-        return False
-    except Exception as e:
-        print(f" [!] Ошибка связи с API Globalping ({e}). Возвращаем False.")
-        return False
+        return None
+    except Exception:
+        return None
 
 def get_rename_tag(country_code, index):
     global COUNTRY_INFO
@@ -708,7 +707,7 @@ def rename_vmess_config(raw_url, new_name):
     return f"vmess://{encoded}"
 
 # =====================================================================
-# ВОРКЕР ДЛЯ ПАРАЛЛЕЛЬНОГО ТЕСТИРОВАНИЯ ИЗ РФ
+# ВОРКЕР С ПРИНЦИПОМ ПРЕЗУМПЦИИ РАБОТОСПОСОБНОСТИ
 # =====================================================================
 def check_ru_accessibility_worker(conf):
     host = conf["host"]
@@ -717,27 +716,31 @@ def check_ru_accessibility_worker(conf):
     sni = conf.get("sni")
     host_header = conf.get("host_header")
     
-    # Рандомизированная небольшая задержка, чтобы API не считали запросы спамом
-    time.sleep(random.uniform(0.5, 2.0))
-    
-    # 1. Сначала пробуем сверхточную проверку через Check-Host
+    # 1. Проверяем через Check-Host
     is_alive_check_host = test_port_from_russia_check_host(host, port)
     
     if is_alive_check_host is True:
         return conf
     elif is_alive_check_host is False:
-        # Check-Host отработал и подтвердил недоступность с Ростелекома
+        print(f"    [-] Проверен из РФ (Check-Host): {host}:{port} ({conf.get('country')}) -> ЗАБЛОКИРОВАН")
         return None
         
-    # 2. Если Check-Host перегружен или вернул ошибку API (None),
-    # используем фолбек на Globalping с отбором абонентских провайдеров
-    is_alive_in_ru = test_port_from_russia(host, port, is_tls=is_tls, sni=sni, host_header=host_header)
-    if is_alive_in_ru:
+    # 2. Если Check-Host перегружен, пробуем Globalping
+    is_alive_globalping = test_port_from_russia(host, port, is_tls=is_tls, sni=sni, host_header=host_header)
+    
+    if is_alive_globalping is True:
         return conf
-    return None
+    elif is_alive_globalping is False:
+        print(f"    [-] Проверен из РФ (Globalping): {host}:{port} ({conf.get('country')}) -> ЗАБЛОКИРОВАН")
+        return None
+        
+    # 3. Если ОБА API недоступны (лимиты превышены), мы СОХРАНЯЕМ сервер.
+    # Он глобально жив, и мы не можем подтвердить блокировку в РФ.
+    print(f"    [?] Не удалось проверить {host}:{port} ({conf.get('country')}) из-за лимитов API. Сохранен по умолчанию.")
+    return conf
 
 # =====================================================================
-# ПОЛНОСТЬЮ ОПТИМИЗИРОВАННАЯ ДВУХЭТАПНАЯ ПРОВЕРКА
+# ДВУХЭТАПНАЯ ПРОВЕРКА БЕЗ ИСКУССТВЕННЫХ ЛИМИТОВ
 # =====================================================================
 def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=None):
     if not raw_configs:
@@ -781,10 +784,11 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
     if not filtered_candidates:
         return []
         
-    candidates_to_check = filtered_candidates[:15]
+    # УБРАН ОГРАНИЧИТЕЛЬ [:15]. Проверяются все доступные серверы.
+    candidates_to_check = filtered_candidates
     
     print(f"[*] Локально доступны: {len(alive_globally)} шт. (после фильтрации забитых стран осталось: {len(filtered_candidates)} шт.)")
-    print(f"[*] Запуск параллельной проверки {len(candidates_to_check)} узлов из РФ через резидентные зонды и Check-Host...")
+    print(f"[*] Запуск проверки {len(candidates_to_check)} узлов из РФ через резидентные зонды и Check-Host...")
     
     verified = []
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -794,7 +798,6 @@ def verify_configs_optimized(raw_configs, max_workers=25, selected_by_country=No
                 res = future.result()
                 if res:
                     verified.append(res)
-                    print(f"    [+] Проверен из РФ: {res['host']}:{res['port']} ({res['country']}) -> РАБОТАЕТ")
             except Exception:
                 pass
                 
@@ -838,7 +841,7 @@ def run_aggregation():
     print(f"[*] После проверки старой подписки сохранено рабочих узлов: {total_selected}/50.")
     
     # 2. ЕСЛИ УЗЛОВ МЕНЬШЕ 50 — ДОБИРАЕМ ИЗ НОВЫХ ИСТОЧНИКОВ
-    if total_selected < 50 and not RATE_LIMITED:
+    if total_selected < 50:
         print("[*] Начинаем сбор новых конфигураций для добора...")
         new_raw_configs = []
         
@@ -859,7 +862,7 @@ def run_aggregation():
         
         test_queue_index = 0
         while test_queue_index < len(test_queue):
-            if len(selected_raws) >= 50 or RATE_LIMITED:
+            if len(selected_raws) >= 50:
                 break
                 
             batch = []
@@ -916,13 +919,11 @@ def run_aggregation():
             
         renamed_lines.append(renamed_raw)
         
-    # --- ОФОРМЛЕНИЕ ПОДПИСКИ С КРАСИВЫМ ТРАФИКОМ И ОПИСАНИЕМ ---
     header_comments = [
-        "#profile-title: base64:TUZITCBDb25uZWN0",  # MFHL Connect в Base64
+        "#profile-title: base64:TUZITCBDb25uZWN0",  
         "#profile-update-interval: 12",
         "#subscription-userinfo: upload=0; download=0; total=1073741824000; expire=1893014400",
-        "#support-url: https://t.me/Amirka_TG",  # Кликабельная кнопка-самолетик
-        # Описание под шкалой трафика
+        "#support-url: https://t.me/Amirka_TG",  
         "#announce: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры",
         "#description: 🛡️ MFHL Connect | Твой мост в свободный интернет без цензуры"
     ]
@@ -961,6 +962,6 @@ def scheduler_loop():
 
 if __name__ == "__main__":
     try:
-        run_aggregation() # Одноразовый запуск для GitHub Actions
+        run_aggregation()
     except KeyboardInterrupt:
         print("\n[*] Работа сборщика остановлена пользователем.")
