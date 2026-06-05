@@ -77,7 +77,6 @@ COUNTRY_INFO = {
 LOCAL_FILE = "local_configs.txt"
 
 RAW_URLS = [
-    "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/refs/heads/main/BLACK_VLESS_RUS_mobile.txt",
     "https://mifa.world/other",
     "https://sub.fawlok.me/",
 ]
